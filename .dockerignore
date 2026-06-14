@@ -1,0 +1,43 @@
+# Keep the build context small and reproducible. Anything listed here is NOT
+# sent to the Docker daemon. Do not ignore Cargo.toml / Cargo.lock / src/ /
+# frontend sources / docker-entrypoint.sh — the Dockerfile needs those.
+
+# --- Rust build output ---
+target/
+**/*.rs.bk
+
+# --- Node / Vite ---
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+**/npm-debug.log*
+**/yarn-error.log*
+**/.pnpm-store/
+
+# --- Runtime data (created at run time, mounted as volumes) ---
+data/
+files/
+uploads/
+
+# --- VCS / editor / OS cruft ---
+**/.git
+**/.gitignore
+.git/
+.gitignore
+**/.github/
+**/.vscode/
+**/.idea/
+**/*.swp
+**/.DS_Store
+**/Thumbs.db
+
+# --- Docker / CI meta (not needed inside the image) ---
+Dockerfile
+docker-compose.yml
+.dockerignore
+**/*.md
+LICENSE
+
+# --- Python reference impl (lives in ../acs; never part of this context) ---
+**/__pycache__/
+**/*.pyc

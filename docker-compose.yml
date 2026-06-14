@@ -1,0 +1,62 @@
+# docker-compose.yml — rv6699-acs  (Linux, host networking)
+#
+# Zero-config: `docker compose up -d --build` just works. Everything is configured
+# in the web console (⚙ Settings) — no .env, no ports to map.
+#
+#   docker compose up -d --build
+#   docker compose logs acs        # <- the first-run admin password is printed here
+#
+# Then open  http://<this-server>:7548/  and log in (user "admin" + that password),
+# and point the router's ACS URL at  http://<this-server>:7547/  (the advertise
+# host is auto-derived from the router's request — no IP to set).
+
+services:
+  acs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rv6699-acs:latest
+    container_name: rv6699-acs
+    restart: unless-stopped
+
+    # The ACS shares the host's network stack: the router reaches it directly on
+    # the host's :7547, the advertise host auto-derives, and outbound Connection
+    # Requests work on the LAN — all with NO port mapping / NAT. Control exposure
+    # with the host firewall, e.g.  ufw allow 7547/tcp  (and restrict 7548 to your
+    # own IP, or front it with a TLS reverse proxy — but keep :7548/files reachable
+    # by the router for Download/Upload). Change the listen ports via env if needed.
+    network_mode: host
+
+    volumes:
+      - ./data:/app/data        # devices.json + settings.json + captures.jsonl (PERSIST this!)
+      - ./files:/app/files      # files you serve to the router via Download
+      - ./uploads:/app/uploads  # files the router Uploads to you
+
+    # Everything is configured in the web console (⚙ Settings). These env overrides
+    # are OPTIONAL — uncomment only to pin a value without the UI:
+    # environment:
+    #   CWMP_PORT: "7547"                # change the listen ports
+    #   CONSOLE_PORT: "7548"
+    #   ADVERTISE_IP: "acs.example.com"  # else auto-derived from the router's Host header
+    #   CONSOLE_PASS: "your-admin-pass"  # else auto-generated on first run (see `logs`)
+    #   ACS_PASS: "router-acs-pass"      # require the router to authenticate to the ACS
+    #   CAPTURE: "1"                      # capture the password the router presents
+
+  # -------------------------------------------------------------------------
+  # Docker Desktop (macOS / Windows) has NO host networking — use published
+  # ports instead and set ADVERTISE_IP to the host's reachable LAN IP. Comment
+  # out the `acs` service above and use this one:
+  # -------------------------------------------------------------------------
+  # acs-desktop:
+  #   build: { context: ., dockerfile: Dockerfile }
+  #   image: rv6699-acs:latest
+  #   restart: unless-stopped
+  #   ports:
+  #     - "7547:7547"
+  #     - "7548:7548"
+  #   environment:
+  #     ADVERTISE_IP: "192.168.1.68"   # REQUIRED here — the host's reachable IP
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./files:/app/files
+  #     - ./uploads:/app/uploads

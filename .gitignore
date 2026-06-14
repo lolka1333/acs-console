@@ -1,0 +1,20 @@
+# Rust
+/target
+Cargo.lock.bak
+
+# Frontend
+frontend/node_modules
+frontend/dist
+frontend/*.tsbuildinfo
+
+# Runtime data (devices.json, settings.json, captures.jsonl, wire.log)
+/data
+/files
+/uploads
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea
+.vscode

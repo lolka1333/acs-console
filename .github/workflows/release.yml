@@ -1,0 +1,51 @@
+name: Release binary
+
+# On a version tag (v1.2.3), build a fully-static single Linux binary (musl,
+# with the web console embedded) and attach it to the GitHub Release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build the console first (embedded into the binary at compile time).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Stage artifact
+        run: |
+          cp target/x86_64-unknown-linux-musl/release/rv6699-acs acs-console-linux-x86_64
+          sha256sum acs-console-linux-x86_64 > acs-console-linux-x86_64.sha256
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            acs-console-linux-x86_64
+            acs-console-linux-x86_64.sha256
+          generate_release_notes: true

@@ -1,0 +1,30 @@
+[package]
+name = "rv6699-acs"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.96"
+description = "A full TR-069 (CWMP) ACS for the Sercomm/MGTS RV6699 GPON router"
+
+[[bin]]
+name = "rv6699-acs"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+roxmltree = "0.21"
+md-5 = "0.11"
+hex = "0.4"
+base64 = "0.22"
+parking_lot = "0.12"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive", "env"] }
+rand = "0.10"
+rust-embed = { version = "8", features = ["mime-guess"] }
+
+[profile.release]
+opt-level = 2
