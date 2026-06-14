@@ -19,7 +19,7 @@ use std::sync::Arc;
 use axum::response::IntoResponse;
 use axum::{
     Router,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use clap::Parser;
 use tower_http::cors::CorsLayer;
@@ -256,6 +256,8 @@ async fn main() {
             "/api/wire",
             get(console::api_get_wire).delete(console::api_clear_wire),
         )
+        .route("/api/captures", delete(console::api_clear_captures))
+        .route("/api/log", delete(console::api_clear_log))
         .route("/api/device/{key}", get(console::api_device))
         .route("/api/device/{key}/task", post(console::api_task))
         .route("/api/device/{key}/connreq", post(console::api_connreq))

@@ -25,7 +25,7 @@ export default function DeviceDetailView({
 }: Props) {
   return (
     <>
-      <CapturesBanner captures={captures} />
+      <CapturesBanner captures={captures} onChanged={onChanged} />
       <DeviceIdentity device={device} />
       <Actions device={device} onChanged={onChanged} />
       <ParametersTable
@@ -34,12 +34,7 @@ export default function DeviceDetailView({
         onFilter={onFilter}
       />
       <TaskHistory history={device.history || []} />
-      <div className="card">
-        <h2>Event log</h2>
-        <div className="body">
-          <EventLog log={log} />
-        </div>
-      </div>
+      <EventLog log={log} onChanged={onChanged} />
     </>
   );
 }

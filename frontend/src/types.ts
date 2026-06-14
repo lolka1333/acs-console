@@ -53,6 +53,8 @@ export interface Task {
   walk_id: number | null;
 }
 
+// Deduped captured ACS credential (see SHARED CONTRACT / store.rs). One row per
+// unique (scheme, username, password|response); repeats bump `count`/`last`.
 export interface Capture {
   scheme: "basic" | "digest";
   username: string;
@@ -64,8 +66,10 @@ export interface Capture {
   cnonce?: string;
   qop?: string;
   uri?: string;
-  ts: string;
-  key: string;
+  key: string | null;
+  first: string; // ISO ts — first time this exact credential was seen
+  last: string; // ISO ts — most recent time it was seen
+  count: number; // how many times this credential has been seen
 }
 
 export interface DeviceView {

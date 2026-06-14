@@ -14,6 +14,36 @@
 * {
   box-sizing: border-box;
 }
+/* ---- Global thin themed scrollbars ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #39424f transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #39424f;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4a5563;
+}
+/* Belt-and-braces for the named scroll containers. */
+.scroll,
+.log,
+.valbox,
+.side,
+main,
+.modal-body,
+.wire-body {
+  scrollbar-width: thin;
+  scrollbar-color: #39424f transparent;
+}
 body {
   margin: 0;
   font: 13px/1.5 ui-monospace, Consolas, Menlo, monospace;
@@ -181,9 +211,26 @@ table {
 th,
 td {
   text-align: left;
-  padding: 4px 8px;
+  padding: 3px 8px;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
+}
+/* Denser variant for compact, scannable tables (captures). */
+table.dense th,
+table.dense td {
+  padding: 2px 8px;
+  line-height: 1.4;
+}
+table.dense tbody tr:hover {
+  background: var(--panel2);
+}
+.seen {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.hash {
+  color: var(--warn);
+  word-break: break-all;
 }
 th {
   color: var(--mut);
@@ -283,13 +330,85 @@ summary {
   margin-bottom: 8px;
 }
 
-/* ---- First-run banner ---- */
+/* Sticky filter input inside the Parameters card body. */
+.filter-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+}
+.filter-sticky .filter {
+  margin-bottom: 0;
+  width: 100%;
+}
+
+/* ---- Card-header controls: chevron, count chip, action cluster ---- */
+.card h2 {
+  gap: 8px;
+}
+.card h2 .head-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+button.chev {
+  background: none;
+  border: none;
+  color: var(--mut);
+  cursor: pointer;
+  font: inherit;
+  padding: 0 2px;
+  line-height: 1;
+}
+button.chev:hover {
+  color: #fff;
+}
+button.sm {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 5px;
+}
+.chip {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  color: var(--mut);
+  background: var(--panel2);
+}
+
+/* ---- First-run banner (slim, dismissible) ---- */
 .banner-setup {
   background: #3a2a0a;
   border-bottom: 1px solid var(--warn);
   color: #ffd479;
-  padding: 9px 16px;
+  padding: 5px 16px;
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.banner-setup .banner-msg {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.banner-x {
+  background: none;
+  border: none;
+  color: #ffd479;
+  cursor: pointer;
+  font: inherit;
+  padding: 0 4px;
+  line-height: 1;
+}
+.banner-x:hover {
+  color: #fff;
 }
 button.linkish {
   background: none;

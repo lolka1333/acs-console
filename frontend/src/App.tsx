@@ -18,6 +18,7 @@ export default function App() {
   const [clock, setClock] = useState(() => new Date().toLocaleTimeString());
   const [showSettings, setShowSettings] = useState(false);
   const [showWire, setShowWire] = useState(false);
+  const [setupDismissed, setSetupDismissed] = useState(false);
 
   // Keep the latest selection readable from the polling closure.
   const selRef = useRef<string | null>(null);
@@ -91,13 +92,25 @@ export default function App() {
         <button onClick={() => setShowSettings(true)}>⚙ Settings</button>
         <span className="meta">{clock}</span>
       </header>
-      {cfg?.needs_setup && (
+      {cfg?.needs_setup && !setupDismissed && (
         <div className="banner-setup">
-          ⚠ Using an auto-generated admin password — open{" "}
-          <button className="linkish" onClick={() => setShowSettings(true)}>
-            Settings
-          </button>{" "}
-          to set your own (it was printed in the server logs).
+          <span className="banner-msg">
+            ⚠ Auto-generated admin password in use (printed in the server logs).
+          </span>
+          <button
+            className="linkish"
+            onClick={() => setShowSettings(true)}
+          >
+            Set password
+          </button>
+          <button
+            className="banner-x"
+            aria-label="Dismiss"
+            title="Dismiss"
+            onClick={() => setSetupDismissed(true)}
+          >
+            ✕
+          </button>
         </div>
       )}
       <div className="wrap">
@@ -114,14 +127,9 @@ export default function App() {
             />
           ) : (
             <>
-              <CapturesBanner captures={captures} />
+              <CapturesBanner captures={captures} onChanged={refresh} />
               {devices.length || captures.length ? (
-                <div className="card">
-                  <h2>Event log</h2>
-                  <div className="body">
-                    <EventLog log={log} />
-                  </div>
-                </div>
+                <EventLog log={log} onChanged={refresh} />
               ) : (
                 <div className="empty">
                   Select a device, or point your router's ACS URL here and wait

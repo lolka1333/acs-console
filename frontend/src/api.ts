@@ -80,3 +80,13 @@ export function getWire(): Promise<WireResponse> {
 export function clearWire(): Promise<{ ok: boolean }> {
   return api<{ ok: boolean }>("/api/wire", "DELETE");
 }
+
+// ---- Clear captured credentials / event log ----
+// Both mirror DELETE /api/wire and sit behind the console_auth middleware.
+export function clearCaptures(): Promise<{ ok: boolean }> {
+  return api<{ ok: boolean }>("/api/captures", "DELETE");
+}
+
+export function clearLog(): Promise<{ ok: boolean }> {
+  return api<{ ok: boolean }>("/api/log", "DELETE");
+}

@@ -50,6 +50,41 @@ fn format_wire_block(e: &WireEntry) -> String {
     s
 }
 
+/// Pull the dedup identity out of a freshly-built capture record:
+/// (scheme, username, secret) where secret is the password for Basic and the
+/// digest response otherwise. Missing fields read as "".
+fn capture_identity(rec: &Value) -> (String, String, String) {
+    let gs = |k: &str| {
+        rec.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let scheme = gs("scheme");
+    let username = gs("username");
+    let secret = if scheme == "basic" {
+        gs("password")
+    } else {
+        gs("response")
+    };
+    (scheme, username, secret)
+}
+
+/// True when an already-stored capture record matches the given identity.
+fn capture_matches(rec: &Value, scheme: &str, username: &str, secret: &str) -> bool {
+    let (s, u, sec) = capture_identity(rec);
+    s == scheme && u == username && sec == secret
+}
+
+/// Bump an existing deduped capture: count += 1, last = now.
+fn bump_capture(rec: &mut Value, now: &str) {
+    if let Some(obj) = rec.as_object_mut() {
+        let next = obj.get("count").and_then(|v| v.as_u64()).unwrap_or(1) + 1;
+        obj.insert("count".to_string(), json!(next));
+        obj.insert("last".to_string(), json!(now));
+    }
+}
+
 /// One queued ACS->CPE RPC (or a discovery walk node).
 #[derive(Debug, Clone)]
 pub struct Task {
@@ -635,34 +670,100 @@ impl Store {
     }
 
     // ---------- captured credentials ----------
+    /// Record a captured credential, DEDUPED. Identity = (scheme, username,
+    /// password for Basic | response for Digest). On a repeat we bump `count`
+    /// and refresh `last`; we never append a duplicate row (in memory or to
+    /// captures.jsonl). A genuinely new credential is pushed (count=1,
+    /// first=last=now) and appended once to the durable log. The deduped
+    /// in-memory list (global + per-device) is capped at ~200 distinct creds.
     pub fn add_capture(&self, key: &str, rec: Value) {
-        let mut rec = rec;
-        {
-            let obj = rec.as_object_mut().unwrap();
-            obj.entry("ts").or_insert_with(|| json!(now_iso()));
-            obj.insert("key".to_string(), json!(key));
-        }
+        let now = now_iso();
+        let (scheme, username, identity) = capture_identity(&rec);
+        // `is_new` decides whether we touch the durable log (only NEW creds).
+        let mut new_record: Option<Value> = None;
         {
             let mut g = self.inner.lock();
-            g.captures.push(rec.clone());
-            if g.captures.len() > 200 {
-                let start = g.captures.len() - 200;
-                g.captures.drain(0..start);
+            // Global list: dedup or insert.
+            if let Some(existing) = g
+                .captures
+                .iter_mut()
+                .find(|c| capture_matches(c, &scheme, &username, &identity))
+            {
+                bump_capture(existing, &now);
+            } else {
+                let mut fresh = rec.clone();
+                {
+                    let obj = fresh.as_object_mut().unwrap();
+                    obj.remove("ts");
+                    obj.insert("key".to_string(), json!(key));
+                    obj.insert("first".to_string(), json!(now));
+                    obj.insert("last".to_string(), json!(now));
+                    obj.insert("count".to_string(), json!(1u64));
+                }
+                g.captures.push(fresh.clone());
+                if g.captures.len() > 200 {
+                    let start = g.captures.len() - 200;
+                    g.captures.drain(0..start);
+                }
+                new_record = Some(fresh);
             }
+            // Per-device list: same dedup against this device's captures.
             if let Some(dev) = g.devices.get_mut(key) {
-                dev.captures.push(rec.clone());
+                if let Some(existing) = dev
+                    .captures
+                    .iter_mut()
+                    .find(|c| capture_matches(c, &scheme, &username, &identity))
+                {
+                    bump_capture(existing, &now);
+                } else {
+                    let mut fresh = rec.clone();
+                    {
+                        let obj = fresh.as_object_mut().unwrap();
+                        obj.remove("ts");
+                        obj.insert("key".to_string(), json!(key));
+                        obj.insert("first".to_string(), json!(now));
+                        obj.insert("last".to_string(), json!(now));
+                        obj.insert("count".to_string(), json!(1u64));
+                    }
+                    dev.captures.push(fresh);
+                    if dev.captures.len() > 200 {
+                        let start = dev.captures.len() - 200;
+                        dev.captures.drain(0..start);
+                    }
+                }
             }
         }
-        // append to a durable log
-        let line = format!("{}\n", serde_json::to_string(&rec).unwrap_or_default());
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.captures_path)
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(line.as_bytes())
-            });
+        // Append to the durable log ONLY for a genuinely new unique credential.
+        if let Some(rec) = new_record {
+            let line = format!("{}\n", serde_json::to_string(&rec).unwrap_or_default());
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.captures_path)
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    f.write_all(line.as_bytes())
+                });
+        }
+    }
+
+    /// Clear all captured credentials: global list, every device's list, and
+    /// truncate captures.jsonl on disk (kept as an empty file).
+    pub fn captures_clear(&self) {
+        {
+            let mut g = self.inner.lock();
+            g.captures.clear();
+            for dev in g.devices.values_mut() {
+                dev.captures.clear();
+            }
+        }
+        let _ = std::fs::write(&self.captures_path, b"");
+    }
+
+    /// Clear the in-memory event log.
+    pub fn log_clear(&self) {
+        let mut g = self.inner.lock();
+        g.log.clear();
     }
 
     // ---------- discovery walks ----------

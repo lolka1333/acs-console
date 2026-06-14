@@ -28,12 +28,14 @@ export default function ParametersTable({ parameters, filter, onFilter }: Props)
         </span>
       </h2>
       <div className="body">
-        <input
-          className="filter wide"
-          placeholder="filter by name or value…"
-          value={filter}
-          onInput={(e) => onFilter((e.target as HTMLInputElement).value)}
-        />
+        <div className="filter-sticky">
+          <input
+            className="filter wide"
+            placeholder="filter by name or value…"
+            value={filter}
+            onInput={(e) => onFilter((e.target as HTMLInputElement).value)}
+          />
+        </div>
         <div className="scroll">
           <table>
             <thead>

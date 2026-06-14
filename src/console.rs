@@ -248,6 +248,20 @@ pub async fn api_clear_wire(State(state): State<Arc<ConsoleState>>) -> Response 
     json_response(json!({ "ok": true }), StatusCode::OK)
 }
 
+// ---- DELETE /api/captures ----
+// Clear the global + per-device captured credentials and truncate captures.jsonl.
+pub async fn api_clear_captures(State(state): State<Arc<ConsoleState>>) -> Response {
+    state.store.captures_clear();
+    json_response(json!({ "ok": true }), StatusCode::OK)
+}
+
+// ---- DELETE /api/log ----
+// Clear the in-memory event log.
+pub async fn api_clear_log(State(state): State<Arc<ConsoleState>>) -> Response {
+    state.store.log_clear();
+    json_response(json!({ "ok": true }), StatusCode::OK)
+}
+
 // ---- GET /api/device/:key ----
 pub async fn api_device(
     State(state): State<Arc<ConsoleState>>,
