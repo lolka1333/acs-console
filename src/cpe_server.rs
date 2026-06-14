@@ -35,6 +35,7 @@ pub struct Session {
     pub cookie: Option<String>,
     pub inflight: Option<Task>, // task awaiting a response
     pub acs_id_seq: u64,
+    pub touched: i64, // unix seconds of last write (for pruning)
 }
 
 pub struct CpeState {
@@ -523,14 +524,33 @@ fn put_session(
     cookie: &Option<String>,
     inflight: Option<Task>,
 ) {
+    let now = chrono::Utc::now().timestamp();
     let mut sessions = state.sessions.lock();
-    let s = sessions.entry(session_id.to_string()).or_default();
-    s.authenticated = authenticated;
-    s.acs_id_seq = acs_id_seq;
-    s.session_ns = session_ns.to_string();
-    s.session_key = session_key.clone();
-    s.cookie = cookie.clone();
-    s.inflight = inflight;
+    // Bound the map: drop sessions untouched for > 10 minutes.
+    if sessions.len() > 64 {
+        sessions.retain(|_, s| now - s.touched < 600);
+    }
+    // Write the session under the primary key (client IP for the cookie-less
+    // Inform that starts the session) AND, once issued, the ACSSESSION cookie.
+    // A real CPE (gSOAP cookie engine) echoes the cookie on every continuation,
+    // so its empty-POST / RPC-response must resolve to the SAME session that the
+    // Inform created — otherwise queued RPCs are never sent.
+    let mut keys: Vec<&str> = vec![session_id];
+    if let Some(c) = cookie {
+        if c != session_id {
+            keys.push(c);
+        }
+    }
+    for key in keys {
+        let s = sessions.entry(key.to_string()).or_default();
+        s.authenticated = authenticated;
+        s.acs_id_seq = acs_id_seq;
+        s.session_ns = session_ns.to_string();
+        s.session_key = session_key.clone();
+        s.cookie = cookie.clone();
+        s.inflight = inflight.clone();
+        s.touched = now;
+    }
 }
 
 // ---------------- auth ----------------
