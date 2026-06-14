@@ -195,6 +195,14 @@ td.val {
   color: #fff;
   word-break: break-all;
 }
+/* clamp huge values (e.g. DeviceInfo.DeviceLog) so one row can't blow up the
+   table; the full value stays scrollable inside the cell and on hover (title). */
+.valbox {
+  max-height: 6.5em;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .tag {
   font-size: 10px;
   padding: 1px 6px;

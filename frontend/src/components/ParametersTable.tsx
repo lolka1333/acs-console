@@ -48,7 +48,11 @@ export default function ParametersTable({ parameters, filter, onFilter }: Props)
               {shown.slice(0, 1500).map((p) => (
                 <tr key={p.name}>
                   <td>{p.name}</td>
-                  <td className="val">{p.value}</td>
+                  <td className="val">
+                    <div className="valbox" title={p.value}>
+                      {p.value}
+                    </div>
+                  </td>
                   <td className="mut">{shortType(p.type)}</td>
                   <td>
                     {p.writable === "1" ? (
