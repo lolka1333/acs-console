@@ -536,10 +536,10 @@ fn put_session(
     // so its empty-POST / RPC-response must resolve to the SAME session that the
     // Inform created — otherwise queued RPCs are never sent.
     let mut keys: Vec<&str> = vec![session_id];
-    if let Some(c) = cookie {
-        if c != session_id {
-            keys.push(c);
-        }
+    if let Some(c) = cookie
+        && c != session_id
+    {
+        keys.push(c);
     }
     for key in keys {
         let s = sessions.entry(key.to_string()).or_default();
