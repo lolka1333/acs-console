@@ -47,9 +47,10 @@ jobs:
           sha256sum acs-console-linux-x86_64 > acs-console-linux-x86_64.sha256
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            acs-console-linux-x86_64
-            acs-console-linux-x86_64.sha256
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # pre-installed gh CLI (a run step) — no Node JS action
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            acs-console-linux-x86_64 acs-console-linux-x86_64.sha256 \
+            --generate-notes
