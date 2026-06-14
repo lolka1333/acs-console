@@ -7,6 +7,10 @@ on:
     branches: [main]
     tags: ['v*']
 
+env:
+  # run JS actions on Node 24 (Node 20 is deprecated on GitHub runners)
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
   packages: write
@@ -15,7 +19,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 

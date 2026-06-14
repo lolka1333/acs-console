@@ -6,6 +6,10 @@ on:
   push:
     tags: ['v*']
 
+env:
+  # run JS actions on Node 24 (Node 20 is deprecated on GitHub runners)
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: write
 
@@ -13,10 +17,10 @@ jobs:
   binary:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Build the console first (embedded into the binary at compile time).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
