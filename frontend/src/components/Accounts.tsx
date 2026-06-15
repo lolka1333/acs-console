@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { DeviceDetail } from "../types";
 import { postConnReq, postTask } from "../api";
 
@@ -31,13 +31,15 @@ export default function Accounts({ device: d, onChanged }: Props) {
   const acctBase = mgmt + "LoginAccount.";
   const shellName = mgmt + "ShellEnable";
 
-  // Build the account table straight from the already-fetched data model.
-  const { accounts, shell, hasData } = useMemo(() => {
+  // Server truth, parsed straight from the fetched data model.
+  const { accounts, shell, serverVals, hasData } = useMemo(() => {
     const byInst: Record<string, Account> = {};
+    const serverVals: Record<string, string> = {};
     let shell: Field | null = null;
     for (const p of d.parameters || []) {
       if (p.name === shellName) {
         shell = { value: p.value, writable: p.writable };
+        serverVals[p.name] = p.value;
         continue;
       }
       if (!p.name.startsWith(acctBase)) continue;
@@ -53,72 +55,101 @@ export default function Accounts({ device: d, onChanged }: Props) {
         byInst[inst] = acc;
       }
       acc.fields[field] = { value: p.value, writable: p.writable };
+      serverVals[p.name] = p.value;
     }
     const accounts = Object.values(byInst).sort((a, b) => +a.inst - +b.inst);
-    return { accounts, shell, hasData: accounts.length > 0 || shell != null };
+    return { accounts, shell, serverVals, hasData: accounts.length > 0 || shell != null };
   }, [d.parameters, acctBase, shellName]);
+
+  // Optimistic overrides keyed by full parameter name: a click shows instantly
+  // (a queued Set only reaches the CPE on its next contact), and each override
+  // is dropped once a later read-back confirms the same value on the server.
+  const [pending, setPending] = useState<Record<string, string>>({});
+  useEffect(() => setPending({}), [d.key]); // forget overrides when switching device
+  useEffect(() => {
+    setPending((prev) => {
+      let next = prev;
+      for (const name in prev) {
+        if (serverVals[name] === prev[name]) {
+          if (next === prev) next = { ...prev };
+          delete next[name];
+        }
+      }
+      return next;
+    });
+  }, [serverVals]);
+
+  const effective = (name: string, server?: string) =>
+    name in pending ? pending[name] : server;
 
   async function task(type: string, args: Record<string, unknown>, label: string) {
     await postTask(d.key, type, args, label);
     setTimeout(onChanged, 300);
   }
 
-  const fetchAll = () => ({ names: [acctBase, shellName] });
+  const subtree = () => ({ names: [acctBase, shellName] });
 
   function load() {
-    void task("get", fetchAll(), "get LoginAccount + ShellEnable");
+    void task("get", subtree(), "get LoginAccount + ShellEnable");
   }
 
-  // Queue a Set, then re-read the subtree so the table reflects the new value
-  // once the CPE has processed the queue.
-  function setField(name: string, value: string, label: string) {
-    void task(
-      "set",
-      { params: [[name, value, ""]], parameter_key: "acs-" + Date.now() },
-      label,
-    );
-    setTimeout(() => void task("get", fetchAll(), "refresh accounts"), 1500);
+  // Queue one SetParameterValues for one or more params and update the optimistic
+  // view synchronously. Confirmed values arrive via the parent poll / Load / Apply.
+  function setFields(params: [string, string, string][], label: string) {
+    setPending((p) => {
+      const next = { ...p };
+      for (const [name, value] of params) next[name] = value;
+      return next;
+    });
+    void task("set", { params, parameter_key: "acs-" + Date.now() }, label);
   }
+  const setField = (name: string, value: string, label: string) =>
+    setFields([[name, value, ""]], label);
 
   function setGroup(a: Account, g: string) {
     setField(`${acctBase}${a.inst}.Group`, g, `account ${a.inst}: Group=${g}`);
   }
 
   function togglePerm(a: Account, tok: string) {
-    const cur = permSet(a.fields.Permission?.value);
+    const name = `${acctBase}${a.inst}.Permission`;
+    const cur = permSet(effective(name, a.fields.Permission?.value));
     if (cur.has(tok)) cur.delete(tok);
     else cur.add(tok);
     const ordered = PERMS.filter((t) => cur.has(t)).concat(
       [...cur].filter((t) => !PERMS.includes(t)),
     );
     setField(
-      `${acctBase}${a.inst}.Permission`,
+      name,
       ordered.join(","),
       `account ${a.inst}: Permission=${ordered.join(",") || "(none)"}`,
     );
   }
 
   function toggleEnable(a: Account) {
-    const on = isOn(a.fields.Enable?.value);
-    setField(
-      `${acctBase}${a.inst}.Enable`,
-      on ? "0" : "1",
-      `account ${a.inst}: ${on ? "disable" : "enable"}`,
-    );
+    const name = `${acctBase}${a.inst}.Enable`;
+    const on = isOn(effective(name, a.fields.Enable?.value));
+    setField(name, on ? "0" : "1", `account ${a.inst}: ${on ? "disable" : "enable"}`);
   }
 
   function setShell(on: boolean) {
     setField(shellName, on ? "1" : "0", `ShellEnable=${on ? 1 : 0}`);
   }
 
-  // The common workflow: promote an account to admin AND open the shell gate.
+  // The common workflow: promote to admin AND open the shell gate, in one
+  // atomic SetParameterValues (TR-069 SPV carries multiple params natively).
   function makeAdmin(a: Account) {
-    setField(`${acctBase}${a.inst}.Group`, "admin", `account ${a.inst}: -> admin`);
-    setField(shellName, "1", "ShellEnable=1");
+    setFields(
+      [[`${acctBase}${a.inst}.Group`, "admin", ""], [shellName, "1", ""]],
+      `account ${a.inst}: -> admin + ShellEnable=1`,
+    );
   }
 
+  // Push queued changes now: queue a read-back first so the CPE drains the
+  // pending Sets and then this Get within one session, then open the session.
   async function applyNow() {
+    await postTask(d.key, "get", subtree(), "refresh accounts");
     const r = await postConnReq(d.key);
+    setTimeout(onChanged, 300);
     window.alert((r.ok ? "OK: " : "FAILED: ") + r.detail);
   }
 
@@ -127,18 +158,26 @@ export default function Accounts({ device: d, onChanged }: Props) {
       void task("reboot", { command_key: "acs-reboot" }, "REBOOT");
   }
 
-  const name = (a: Account) =>
+  const acctLabel = (a: Account) =>
     a.fields.UserName?.value || a.fields.FullName?.value || "(account " + a.inst + ")";
+
+  const shellKnown = shell != null || shellName in pending;
+  const shellOn = isOn(effective(shellName, shell?.value));
 
   return (
     <div className="card">
       <h2>
         Users &amp; Groups <span className="pill">{accounts.length} account(s)</span>
         <span className="head-actions">
-          <button className="sm" onClick={load}>
+          <button type="button" className="sm" onClick={load}>
             ↻ Load
           </button>
-          <button className="sm" onClick={applyNow} title="Connection Request — push the queued changes now">
+          <button
+            type="button"
+            className="sm"
+            onClick={applyNow}
+            title="Connection Request — push the queued changes now"
+          >
             📡 Apply now
           </button>
         </span>
@@ -146,13 +185,13 @@ export default function Accounts({ device: d, onChanged }: Props) {
       <div className="body">
         <div className="row">
           <span className="mut">Shell access (X_SC_Management.ShellEnable):</span>
-          <span className={"chip" + (shell && isOn(shell.value) ? " on" : "")}>
-            {shell ? (isOn(shell.value) ? "ON" : "OFF") : "unknown"}
+          <span className={"chip" + (shellKnown && shellOn ? " on" : "")}>
+            {shellKnown ? (shellOn ? "ON" : "OFF") : "unknown"}
           </span>
-          <button className="sm" onClick={() => setShell(true)}>
+          <button type="button" className="sm" onClick={() => setShell(true)}>
             Enable shell
           </button>
-          <button className="sm" onClick={() => setShell(false)}>
+          <button type="button" className="sm" onClick={() => setShell(false)}>
             Disable
           </button>
         </div>
@@ -177,18 +216,25 @@ export default function Accounts({ device: d, onChanged }: Props) {
               </thead>
               <tbody>
                 {accounts.map((a) => {
-                  const group = a.fields.Group?.value;
-                  const perms = permSet(a.fields.Permission?.value);
+                  const group = effective(`${acctBase}${a.inst}.Group`, a.fields.Group?.value);
+                  const perms = permSet(
+                    effective(`${acctBase}${a.inst}.Permission`, a.fields.Permission?.value),
+                  );
+                  const enabled = isOn(
+                    effective(`${acctBase}${a.inst}.Enable`, a.fields.Enable?.value),
+                  );
                   return (
                     <tr key={a.inst}>
                       <td className="mut">{a.inst}</td>
-                      <td className="val">{name(a)}</td>
+                      <td className="val">{acctLabel(a)}</td>
                       <td>
                         <div className="grp">
                           {GROUPS.map((g) => (
                             <button
                               key={g}
+                              type="button"
                               className={"sm" + (group === g ? " acc" : "")}
+                              aria-pressed={group === g}
                               onClick={() => setGroup(a, g)}
                             >
                               {g}
@@ -199,23 +245,31 @@ export default function Accounts({ device: d, onChanged }: Props) {
                       <td>
                         <div className="grp">
                           {PERMS.map((tok) => (
-                            <span
+                            <button
                               key={tok}
-                              className={"chip click" + (perms.has(tok) ? " on" : "")}
+                              type="button"
+                              className={"chip" + (perms.has(tok) ? " on" : "")}
+                              aria-pressed={perms.has(tok)}
                               onClick={() => togglePerm(a, tok)}
                             >
                               {tok}
-                            </span>
+                            </button>
                           ))}
                         </div>
                       </td>
                       <td>
-                        <button className="sm" onClick={() => toggleEnable(a)}>
-                          {isOn(a.fields.Enable?.value) ? "✓ on" : "✗ off"}
+                        <button
+                          type="button"
+                          className="sm"
+                          aria-pressed={enabled}
+                          onClick={() => toggleEnable(a)}
+                        >
+                          {enabled ? "✓ on" : "✗ off"}
                         </button>
                       </td>
                       <td>
                         <button
+                          type="button"
                           className="sm acc"
                           title="Set Group=admin and ShellEnable=1 (then reboot)"
                           onClick={() => makeAdmin(a)}
@@ -235,8 +289,8 @@ export default function Accounts({ device: d, onChanged }: Props) {
           Changes are queued and apply when the CPE next processes the queue (use
           <b> 📡 Apply now</b> to push immediately). Group / permission changes
           need a <b>reboot</b> to regenerate the CLI privilege file before{" "}
-          <code>sh</code> becomes visible.
-          <button className="sm" style={{ marginLeft: 8 }} onClick={reboot}>
+          <code>sh</code> becomes visible.{" "}
+          <button type="button" className="sm" onClick={reboot}>
             Reboot to apply
           </button>
         </div>

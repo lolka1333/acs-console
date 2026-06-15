@@ -380,15 +380,7 @@ button.sm {
   color: var(--mut);
   background: var(--panel2);
 }
-/* Toggleable permission chips (Users & Groups panel). */
-.chip.click {
-  cursor: pointer;
-  user-select: none;
-}
-.chip.click:hover {
-  border-color: var(--acc);
-  color: #fff;
-}
+/* On-state for toggle controls styled as chips (Users & Groups permissions). */
 .chip.on {
   color: var(--ok);
   border-color: var(--ok);
