@@ -39,6 +39,27 @@ export function summarize(t: Task): string {
   return JSON.stringify(r).slice(0, 120);
 }
 
+// Full, multi-line expansion of a task result for the expandable history cell —
+// every value, not the 3-item preview `summarize` shows. Returns null when the
+// one-liner is already complete (faults, status/instance, empty) so the row
+// doesn't grow a pointless expander.
+export function resultLines(t: Task): string | null {
+  if (t.fault) return null;
+  const r = t.result || {};
+  if (r.parameters?.length)
+    return r.parameters.map((p) => `${p.name} = ${p.value}`).join("\n");
+  if (r.names?.length)
+    return r.names
+      .map(
+        (n) =>
+          n.name +
+          (n.writable === "1" ? "  (rw)" : n.writable === "0" ? "  (ro)" : ""),
+      )
+      .join("\n");
+  if (r.methods?.length) return r.methods.join("\n");
+  return null;
+}
+
 // Normalise xsd:string -> string for the type column.
 export function shortType(type: string | undefined): string {
   return (type || "").replace("xsd:", "");

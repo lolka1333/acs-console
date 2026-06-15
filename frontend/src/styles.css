@@ -387,6 +387,34 @@ button.sm {
   background: rgba(63, 185, 80, 0.12);
 }
 
+/* ---- Expandable task-result cell (Task history) ---- */
+details.taskres > summary {
+  color: inherit; /* keep the table value colour, not link-blue */
+  list-style: none;
+}
+details.taskres > summary::-webkit-details-marker {
+  display: none;
+}
+details.taskres > summary::before {
+  content: "▸ ";
+  color: var(--acc);
+}
+details.taskres[open] > summary::before {
+  content: "▾ ";
+}
+.taskres-body {
+  margin: 6px 0 2px;
+  padding: 8px;
+  background: #0b0e13;
+  border-radius: 6px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.5 ui-monospace, Consolas, Menlo, monospace;
+  color: var(--fg);
+}
+
 /* ---- First-run banner (slim, dismissible) ---- */
 .banner-setup {
   background: #3a2a0a;

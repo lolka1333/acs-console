@@ -1,8 +1,20 @@
 import type { Task } from "../types";
-import { summarize } from "../util";
+import { resultLines, summarize } from "../util";
 
 interface Props {
   history: Task[];
+}
+
+// Compact summary by default; click to expand the full name=value list.
+function ResultCell({ task }: { task: Task }) {
+  const full = resultLines(task);
+  if (!full) return <>{summarize(task)}</>;
+  return (
+    <details className="taskres">
+      <summary>{summarize(task)}</summary>
+      <pre className="taskres-body">{full}</pre>
+    </details>
+  );
 }
 
 export default function TaskHistory({ history }: Props) {
@@ -29,7 +41,9 @@ export default function TaskHistory({ history }: Props) {
                   <td>
                     <span className={"st " + t.status}>{t.status}</span>
                   </td>
-                  <td className="val">{summarize(t)}</td>
+                  <td className="val">
+                    <ResultCell task={t} />
+                  </td>
                 </tr>
               ))}
             </tbody>
