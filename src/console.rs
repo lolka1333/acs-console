@@ -242,7 +242,7 @@ pub async fn api_get_wire(State(state): State<Arc<ConsoleState>>) -> Response {
 }
 
 // ---- DELETE /api/wire ----
-// Clear the wire ring buffer and truncate data/wire.log.
+// Clear the wire ring buffer and the durable wire table.
 pub async fn api_clear_wire(State(state): State<Arc<ConsoleState>>) -> Response {
     state.store.wire_clear();
     json_response(json!({ "ok": true }), StatusCode::OK)

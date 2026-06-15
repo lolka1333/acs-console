@@ -379,9 +379,6 @@ pub struct ParsedMessage {
     // Inform
     pub device_id: std::collections::HashMap<String, String>,
     pub events: Vec<EventStruct>,
-    pub current_time: String,
-    pub retry_count: String,
-    pub max_envelopes: String,
     pub parameters: Vec<ParamValue>,
 
     // GetParameterNamesResponse
@@ -397,8 +394,6 @@ pub struct ParsedMessage {
     pub methods: Vec<String>,
 
     // Fault
-    pub faultcode: String,
-    pub faultstring: String,
     pub cwmp_fault_code: String,
     pub cwmp_fault_string: String,
     pub set_faults: Vec<SetFault>,
@@ -407,9 +402,6 @@ pub struct ParsedMessage {
     pub command_key: String,
     pub fault_code: String,
     pub fault_string: String,
-    pub is_download: String,
-    pub transfer_url: String,
-    pub file_type: String,
 }
 
 // --- parsing helpers --------------------------------------------------------
@@ -566,9 +558,6 @@ fn parse_inform(rpc: Node, out: &mut ParsedMessage) {
             }
         }
     }
-    out.current_time = txt(rpc, "CurrentTime");
-    out.retry_count = txt(rpc, "RetryCount");
-    out.max_envelopes = txt(rpc, "MaxEnvelopes");
     out.parameters = parse_value_list(rpc);
 }
 
@@ -645,8 +634,6 @@ fn parse_attr_list(rpc: Node) -> Vec<ParamAttr> {
 }
 
 fn parse_fault(rpc: Node, out: &mut ParsedMessage) {
-    out.faultcode = txt(rpc, "faultcode");
-    out.faultstring = txt(rpc, "faultstring");
     // inner cwmp:Fault (a descendant Fault that is not rpc itself)
     let cwmp_fault = rpc
         .descendants()
@@ -674,7 +661,4 @@ fn parse_transfer_complete(rpc: Node, out: &mut ParsedMessage) {
     out.command_key = txt(rpc, "CommandKey");
     out.start_time = Some(txt(rpc, "StartTime"));
     out.complete_time = Some(txt(rpc, "CompleteTime"));
-    out.is_download = txt(rpc, "IsDownload");
-    out.transfer_url = txt(rpc, "TransferURL");
-    out.file_type = txt(rpc, "FileType");
 }

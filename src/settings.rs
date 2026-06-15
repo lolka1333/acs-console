@@ -46,7 +46,8 @@ pub struct Settings {
 
     /// Diagnostic "wire log": when true, the CWMP endpoint records every
     /// inbound request and outbound response (headers masked for secrets, body
-    /// verbatim) into an in-memory ring buffer + data/wire.log. Default false.
+    /// verbatim) into an in-memory ring buffer and the durable SQLite wire
+    /// table. Default false.
     #[serde(default)]
     pub debug_wire: bool,
 }

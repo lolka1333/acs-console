@@ -481,7 +481,6 @@ pub struct Store {
     path: std::path::PathBuf,
     captures_path: std::path::PathBuf,
     settings_path: std::path::PathBuf,
-    wire_log_path: std::path::PathBuf,
     /// Embedded SQLite connection (the durable store of record). Wrapped in a
     /// Mutex so the synchronous rusqlite handle is shared safely across tasks.
     db: Mutex<Connection>,
@@ -576,13 +575,11 @@ impl Store {
         advertise_ip: String,
         advertise_ip_explicit: bool,
     ) -> Store {
-        // wire.log + acs.db live in the data dir alongside settings.json (same
-        // parent).
+        // acs.db lives in the data dir alongside settings.json (same parent).
         let data_dir = settings_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let wire_log_path = data_dir.join("wire.log");
         let db_path = data_dir.join("acs.db");
 
         let db = open_db(&db_path);
@@ -591,7 +588,6 @@ impl Store {
             path,
             captures_path,
             settings_path,
-            wire_log_path,
             db: Mutex::new(db),
             inner: Mutex::new(Inner {
                 devices: BTreeMap::new(),
@@ -619,11 +615,6 @@ impl Store {
     /// Next monotonic wire frame id.
     fn next_wire_id(&self) -> u64 {
         self.wire_seq.fetch_add(1, Ordering::SeqCst)
-    }
-
-    /// Path to the durable wire.log file (data_dir + "wire.log").
-    pub fn wire_log_path(&self) -> &std::path::Path {
-        &self.wire_log_path
     }
 
     /// Build + record a wire frame: assigns the id/ts, pushes into the capped
@@ -874,7 +865,7 @@ impl Store {
                     bump_capture(existing, &now);
                     device_persist = Some(existing.clone());
                 } else {
-                    let mut fresh = rec.clone();
+                    let mut fresh = rec;
                     {
                         let obj = fresh.as_object_mut().unwrap();
                         obj.remove("ts");

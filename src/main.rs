@@ -84,10 +84,10 @@ struct Cli {
     #[arg(long, env = "CHALLENGE", default_value = "basic", value_parser = ["basic", "digest", "both"])]
     challenge: String,
     /// diagnostic CWMP "wire log": record every inbound request + outbound
-    /// response (Authorization header masked) to an in-memory ring + the
-    /// data/wire.log file. Bare `--debug-wire` enables it; the DEBUG_WIRE env
-    /// var accepts 1/0/true/false/yes/no/on/off. Also toggleable live from the
-    /// web Settings panel.
+    /// response (Authorization header masked) to an in-memory ring buffer and
+    /// the durable SQLite wire table. Bare `--debug-wire` enables it; the
+    /// DEBUG_WIRE env var accepts 1/0/true/false/yes/no/on/off. Also toggleable
+    /// live from the web Settings panel.
     #[arg(
         long,
         env = "DEBUG_WIRE",
@@ -320,12 +320,7 @@ async fn main() {
         .layer(CorsLayer::permissive());
 
     // ---- banner ----
-    print_banner(
-        &cfg,
-        &store.settings(),
-        &store.advertise_effective(),
-        &store.wire_log_path().to_string_lossy(),
-    );
+    print_banner(&cfg, &store.settings(), &store.advertise_effective());
     if let Some(pw) = &generated_pass {
         print_first_run_notice(&store.with_settings(|s| s.console_username.clone()), pw);
     }
@@ -413,7 +408,7 @@ fn print_first_run_notice(user: &str, password: &str) {
     );
 }
 
-fn print_banner(cfg: &Config, s: &Settings, advertise_effective: &str, wire_log_path: &str) {
+fn print_banner(cfg: &Config, s: &Settings, advertise_effective: &str) {
     let auth_line = if s.capture {
         format!(
             "CAPTURE mode (challenge={}) — logging the credentials the CPE presents",
@@ -456,7 +451,7 @@ fn print_banner(cfg: &Config, s: &Settings, advertise_effective: &str, wire_log_
         format!("configured = {}", s.advertise_host)
     };
     let wire_line = if s.debug_wire {
-        format!("ON  -> {} (toggle in Settings)", wire_log_path)
+        "ON  (toggle in Settings)".to_string()
     } else {
         "off (enable with --debug-wire or in Settings)".to_string()
     };

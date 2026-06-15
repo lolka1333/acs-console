@@ -103,26 +103,6 @@ fn host_from_headers(headers: &HeaderMap) -> Option<String> {
     }
 }
 
-fn charset(headers: &HeaderMap) -> String {
-    let ct = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
-    if let Some(idx) = ct.find("charset=") {
-        let cs = ct[idx + "charset=".len()..]
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .trim_matches('"');
-        if !cs.is_empty() {
-            return cs.to_string();
-        }
-    }
-    "utf-8".to_string()
-}
-
 /// GET on the CWMP endpoint = health check.
 pub async fn cwmp_get() -> Response {
     (
@@ -230,7 +210,6 @@ pub async fn cwmp_post(
         )
     };
 
-    let _cs = charset(&headers);
     let msg = cwmp::parse(&raw);
     let kind = msg.kind.clone();
 
@@ -865,7 +844,7 @@ fn handle_rpc_response(
     }
 
     if let Some(t) = task {
-        let result = absorb(store, key, &t, msg);
+        let result = absorb(store, key, msg);
         let walk_id = t.walk_id;
         let walk_depth = t.walk_depth;
         let path = t
@@ -885,7 +864,7 @@ fn handle_rpc_response(
     send_next_or_end(store, cfg, session_key, session_ns, seq, inflight)
 }
 
-fn absorb(store: &Store, key: &str, _task: &Task, msg: &cwmp::ParsedMessage) -> Value {
+fn absorb(store: &Store, key: &str, msg: &cwmp::ParsedMessage) -> Value {
     match msg.kind.as_str() {
         "GetParameterValuesResponse" => {
             store.update_parameters(key, &msg.parameters);
@@ -914,11 +893,10 @@ fn absorb(store: &Store, key: &str, _task: &Task, msg: &cwmp::ParsedMessage) -> 
                 .collect();
             json!({ "attributes": attrs })
         }
-        "SetParameterValuesResponse" => json!({ "status": msg.status }),
+        "SetParameterValuesResponse" | "DeleteObjectResponse" => json!({ "status": msg.status }),
         "AddObjectResponse" => {
             json!({ "instance_number": msg.instance_number, "status": msg.status })
         }
-        "DeleteObjectResponse" => json!({ "status": msg.status }),
         "DownloadResponse" | "UploadResponse" => json!({
             "status": msg.status,
             "start_time": msg.start_time,
