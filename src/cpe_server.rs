@@ -170,15 +170,16 @@ fn send_401(cfg: &Config, settings: &Settings) -> Response {
     let body = b"<html><body>401 Unauthorized</body></html>".to_vec();
     let mut headers = HeaderMap::new();
     let challenge = settings.challenge.as_str();
-    // In capture mode we choose the scheme to elicit the credential.
-    // Python sets WWW-Authenticate possibly twice (Basic + Digest); we append both.
-    if settings.capture
-        && (challenge == "basic" || challenge == "both")
+    // Offer the operator-selected scheme(s) in BOTH capture and enforcement modes.
+    // The МГТС cwmp authenticates with Basic by default, so a Digest-only challenge
+    // would lock out a Basic CPE — honoring `challenge` (default "basic") lets the
+    // router answer with the scheme it actually speaks. Both schemes may be sent.
+    if challenge != "digest"
         && let Ok(v) = HeaderValue::from_str(&format!("Basic realm=\"{}\"", cfg.realm))
     {
         headers.append("WWW-Authenticate", v);
     }
-    if !settings.capture || challenge == "digest" || challenge == "both" {
+    if challenge != "basic" {
         let ch = digest::challenge_header(&cfg.realm, &cfg.nonce_secret);
         if let Ok(v) = HeaderValue::from_str(&ch) {
             headers.append("WWW-Authenticate", v);
