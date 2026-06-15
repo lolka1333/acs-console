@@ -380,6 +380,20 @@ button.sm {
   color: var(--mut);
   background: var(--panel2);
 }
+/* Toggleable permission chips (Users & Groups panel). */
+.chip.click {
+  cursor: pointer;
+  user-select: none;
+}
+.chip.click:hover {
+  border-color: var(--acc);
+  color: #fff;
+}
+.chip.on {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: rgba(63, 185, 80, 0.12);
+}
 
 /* ---- First-run banner (slim, dismissible) ---- */
 .banner-setup {
