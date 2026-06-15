@@ -25,6 +25,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 rand = "0.10"
 rust-embed = { version = "8", features = ["mime-guess"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 opt-level = 2

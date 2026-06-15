@@ -1,7 +1,15 @@
 //! store.rs — thread-safe device registry, parameter cache, and task queue
-//! (port of store.py). Devices + discovered parameters persist to JSON.
+//! (port of store.py). Devices, discovered parameters, the task queue/history,
+//! events, captured credentials, the diagnostic wire log, and settings all
+//! persist incrementally to an embedded SQLite database (`acs.db`) in the data
+//! dir. The in-memory model is kept as the single source of truth for reads; we
+//! write through to SQLite on every mutation (best-effort — DB errors are
+//! logged, never fatal). On first run we migrate any legacy JSON files
+//! (devices.json / captures.jsonl / settings.json) into the DB and rename them
+//! `.bak` so the import happens exactly once.
 
 use parking_lot::{Mutex, RwLock};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, VecDeque};
@@ -11,9 +19,15 @@ use crate::settings::Settings;
 
 static TASK_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Max number of wire-log frames kept in the in-memory ring buffer (the
-/// durable wire.log keeps everything appended until cleared).
+/// Max number of wire-log frames kept in the in-memory ring buffer (SQLite
+/// keeps a larger durable window — see `WIRE_DB_CAP`).
 const WIRE_CAP: usize = 300;
+
+/// Max number of wire-log rows retained in SQLite before old rows are pruned.
+const WIRE_DB_CAP: i64 = 5000;
+
+/// Max number of event rows retained in SQLite before old rows are pruned.
+const EVENT_DB_CAP: i64 = 1000;
 
 pub fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -23,31 +37,19 @@ fn next_task_id() -> u64 {
     TASK_SEQ.fetch_add(1, Ordering::SeqCst)
 }
 
-/// Render a wire frame as a human-readable block for the durable wire.log.
-fn format_wire_block(e: &WireEntry) -> String {
-    use std::fmt::Write as _;
-    let arrow = if e.dir == "in" { "<<< IN " } else { ">>> OUT" };
-    let mut s = String::new();
-    let _ = writeln!(
-        s,
-        "{} #{} {} client={} session={} | {}",
-        arrow,
-        e.id,
-        e.ts,
-        e.client_ip,
-        e.session_key.as_deref().unwrap_or("-"),
-        e.summary,
-    );
-    for (k, v) in &e.headers {
-        let _ = writeln!(s, "    {}: {}", k, v);
+/// Advance `TASK_SEQ` so the next allocated id is strictly greater than any id
+/// already loaded from the DB (prevents id collisions with persisted tasks).
+fn bump_task_seq(max_loaded: u64) {
+    let want = max_loaded + 1;
+    // monotonic compare-and-bump; spin only on concurrent startup writers (none
+    // exist at load time, so this resolves on the first iteration in practice).
+    let mut cur = TASK_SEQ.load(Ordering::SeqCst);
+    while cur < want {
+        match TASK_SEQ.compare_exchange(cur, want, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => break,
+            Err(observed) => cur = observed,
+        }
     }
-    if e.body.is_empty() {
-        let _ = writeln!(s, "    <empty body>");
-    } else {
-        let _ = writeln!(s, "    --- body ---\n{}", e.body);
-    }
-    s.push('\n');
-    s
 }
 
 /// Pull the dedup identity out of a freshly-built capture record:
@@ -144,6 +146,61 @@ impl Task {
             "updated": self.updated,
             "walk_id": self.walk_id,
         })
+    }
+
+    /// Full lossless serialization for the SQLite `tasks.data` column (every
+    /// field, including the ones `to_value` drops for the UI). Reversible via
+    /// `from_persist`.
+    pub fn to_persist(&self) -> Value {
+        json!({
+            "id": self.id,
+            "type": self.type_,
+            "args": self.args,
+            "label": self.label,
+            "status": self.status,
+            "result": self.result,
+            "fault": self.fault,
+            "created": self.created,
+            "updated": self.updated,
+            "cwmp_id": self.cwmp_id,
+            "walk_id": self.walk_id,
+            "walk_depth": self.walk_depth,
+        })
+    }
+
+    /// Reconstruct a Task from `to_persist` output, defaulting any missing
+    /// fields (forward/backward compatible with schema drift).
+    pub fn from_persist(d: &Value) -> Task {
+        let gs = |k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = d.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let type_ = gs("type");
+        Task {
+            id,
+            type_: type_.clone(),
+            args: d.get("args").cloned().unwrap_or(Value::Null),
+            label: {
+                let l = gs("label");
+                if l.is_empty() { type_ } else { l }
+            },
+            status: {
+                let s = gs("status");
+                if s.is_empty() {
+                    "pending".to_string()
+                } else {
+                    s
+                }
+            },
+            result: d.get("result").cloned().unwrap_or(Value::Null),
+            fault: d.get("fault").cloned().unwrap_or(Value::Null),
+            created: gs("created"),
+            updated: gs("updated"),
+            cwmp_id: d
+                .get("cwmp_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            walk_id: d.get("walk_id").and_then(|v| v.as_u64()),
+            walk_depth: d.get("walk_depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        }
     }
 }
 
@@ -425,6 +482,9 @@ pub struct Store {
     captures_path: std::path::PathBuf,
     settings_path: std::path::PathBuf,
     wire_log_path: std::path::PathBuf,
+    /// Embedded SQLite connection (the durable store of record). Wrapped in a
+    /// Mutex so the synchronous rusqlite handle is shared safely across tasks.
+    db: Mutex<Connection>,
     inner: Mutex<Inner>,
     /// Diagnostic CWMP wire-log ring buffer (most-recent WIRE_CAP frames).
     wire: Mutex<VecDeque<WireEntry>>,
@@ -439,6 +499,71 @@ pub struct Store {
     advertise_ip_explicit: bool,
 }
 
+/// CREATE-IF-NOT-EXISTS schema for the embedded DB.
+const SCHEMA_SQL: &str = "
+CREATE TABLE IF NOT EXISTS devices (
+    key TEXT PRIMARY KEY,
+    oui TEXT, serial TEXT, product_class TEXT, manufacturer TEXT,
+    model TEXT, software_version TEXT, ip TEXT, cwmp_ns TEXT, root TEXT,
+    connection_request_url TEXT, last_inform TEXT, last_seen TEXT,
+    rpc_methods TEXT
+);
+CREATE TABLE IF NOT EXISTS parameters (
+    device_key TEXT, name TEXT, value TEXT, type TEXT, writable TEXT, ts TEXT,
+    PRIMARY KEY(device_key, name)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS attributes (
+    device_key TEXT, name TEXT, notification TEXT, access_list TEXT,
+    PRIMARY KEY(device_key, name)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY,
+    device_key TEXT, queued INTEGER, data TEXT, created TEXT, updated TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_dev ON tasks(device_key);
+CREATE TABLE IF NOT EXISTS captures (
+    device_key TEXT, scheme TEXT, username TEXT, secret TEXT, data TEXT,
+    PRIMARY KEY(device_key, scheme, username, secret)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT, device_key TEXT, level TEXT, message TEXT
+);
+CREATE TABLE IF NOT EXISTS wire (
+    id INTEGER PRIMARY KEY,
+    ts TEXT, dir TEXT, client_ip TEXT, session_key TEXT, summary TEXT,
+    headers TEXT, body TEXT
+);
+CREATE TABLE IF NOT EXISTS settings (k INTEGER PRIMARY KEY, v TEXT);
+";
+
+/// Open (creating if needed) the SQLite DB, apply pragmas, and create the
+/// schema. On any failure we fall back to an in-memory DB so the server still
+/// runs (persistence is best-effort, never fatal).
+fn open_db(path: &std::path::Path) -> Connection {
+    let conn = match Connection::open(path) {
+        Ok(c) => c,
+        Err(e) => {
+            println!(
+                "[store] db: open {} failed: {e}; using in-memory",
+                path.display()
+            );
+            Connection::open_in_memory().expect("in-memory sqlite must open")
+        }
+    };
+    // WAL for concurrent readers + crash safety; NORMAL sync is the WAL-recommended
+    // durability/speed balance; enforce foreign keys.
+    if let Err(e) = conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+    ) {
+        println!("[store] db: pragma failed: {e}");
+    }
+    if let Err(e) = conn.execute_batch(SCHEMA_SQL) {
+        println!("[store] db: schema failed: {e}");
+    }
+    conn
+}
+
 impl Store {
     /// `seed` is the startup settings (from CLI/env). If settings.json exists at
     /// `settings_path` it overrides the seed (UI changes win and persist).
@@ -451,16 +576,23 @@ impl Store {
         advertise_ip: String,
         advertise_ip_explicit: bool,
     ) -> Store {
-        // wire.log lives in the data dir alongside settings.json (same parent).
-        let wire_log_path = settings_path
+        // wire.log + acs.db live in the data dir alongside settings.json (same
+        // parent).
+        let data_dir = settings_path
             .parent()
-            .map(|p| p.join("wire.log"))
-            .unwrap_or_else(|| std::path::PathBuf::from("wire.log"));
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let wire_log_path = data_dir.join("wire.log");
+        let db_path = data_dir.join("acs.db");
+
+        let db = open_db(&db_path);
+
         let store = Store {
             path,
             captures_path,
             settings_path,
             wire_log_path,
+            db: Mutex::new(db),
             inner: Mutex::new(Inner {
                 devices: BTreeMap::new(),
                 log: Vec::new(),
@@ -475,8 +607,11 @@ impl Store {
             advertise_ip,
             advertise_ip_explicit,
         };
-        store.load();
-        store.load_settings();
+        // One-time legacy-JSON import (only when the DB is empty), then load all
+        // state (devices, params, attrs, tasks, captures, events, wire, settings)
+        // from the DB into memory.
+        store.migrate_legacy_if_empty();
+        store.load_from_db();
         store
     }
 
@@ -492,8 +627,9 @@ impl Store {
     }
 
     /// Build + record a wire frame: assigns the id/ts, pushes into the capped
-    /// ring buffer, and appends a human-readable block to wire.log. File I/O
-    /// happens OUTSIDE the ring-buffer lock (short critical section only).
+    /// in-memory ring buffer, and INSERTs a durable row into the `wire` table
+    /// (pruned to the newest `WIRE_DB_CAP` rows). DB I/O happens OUTSIDE the
+    /// ring-buffer lock (short critical section only).
     pub fn wire_push(
         &self,
         dir: &str,
@@ -513,24 +649,41 @@ impl Store {
             headers,
             body: body.to_string(),
         };
-        // Format the durable block before taking any lock.
-        let block = format_wire_block(&entry);
+        // Serialize headers before taking any lock.
+        let headers_json =
+            serde_json::to_string(&entry.headers).unwrap_or_else(|_| "{}".to_string());
         {
             let mut q = self.wire.lock();
-            q.push_back(entry);
+            q.push_back(entry.clone());
             while q.len() > WIRE_CAP {
                 q.pop_front();
             }
         }
-        // Append outside the lock.
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.wire_log_path)
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(block.as_bytes())
-            });
+        // Persist outside the ring-buffer lock.
+        let conn = self.db.lock();
+        let r = conn.execute(
+            "INSERT OR REPLACE INTO wire(id,ts,dir,client_ip,session_key,summary,headers,body)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![
+                entry.id as i64,
+                entry.ts,
+                entry.dir,
+                entry.client_ip,
+                entry.session_key,
+                entry.summary,
+                headers_json,
+                entry.body,
+            ],
+        );
+        if let Err(e) = r {
+            println!("[store] db: wire insert: {e}");
+        } else if let Err(e) = conn.execute(
+            "DELETE FROM wire WHERE id NOT IN
+             (SELECT id FROM wire ORDER BY id DESC LIMIT ?1)",
+            rusqlite::params![WIRE_DB_CAP],
+        ) {
+            println!("[store] db: wire prune: {e}");
+        }
     }
 
     /// Clone the ring buffer (oldest-first) for the API.
@@ -539,14 +692,15 @@ impl Store {
         q.iter().cloned().collect()
     }
 
-    /// Clear the in-memory ring buffer and truncate wire.log on disk.
+    /// Clear the in-memory ring buffer and the durable `wire` table.
     pub fn wire_clear(&self) {
         {
             let mut q = self.wire.lock();
             q.clear();
         }
-        // Truncate (don't delete) so the file still exists for tailing.
-        let _ = std::fs::write(&self.wire_log_path, b"");
+        if let Err(e) = self.db.lock().execute("DELETE FROM wire", []) {
+            println!("[store] db: wire clear: {e}");
+        }
     }
 
     // ---------- runtime settings ----------
@@ -637,50 +791,51 @@ impl Store {
     fn save_settings(&self) {
         let data = {
             let g = self.settings.read();
-            serde_json::to_string_pretty(&*g).unwrap_or_default()
+            serde_json::to_string(&*g).unwrap_or_default()
         };
-        let tmp = self.settings_path.with_extension("json.tmp");
-        match std::fs::write(&tmp, data) {
-            Ok(_) => {
-                if let Err(e) = std::fs::rename(&tmp, &self.settings_path) {
-                    println!("[store] settings save failed: {}", e);
-                }
-            }
-            Err(e) => println!("[store] settings save failed: {}", e),
+        if let Err(e) = self.db.lock().execute(
+            "INSERT INTO settings(k,v) VALUES (0,?1)
+             ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            rusqlite::params![data],
+        ) {
+            println!("[store] db: settings save: {e}");
         }
     }
 
-    fn load_settings(&self) {
-        if !self.settings_path.exists() {
-            return;
-        }
-        let text = match std::fs::read_to_string(&self.settings_path) {
-            Ok(t) => t,
-            Err(e) => {
-                println!("[store] settings load failed: {}", e);
-                return;
-            }
+    /// Load the single settings row (k=0) from the DB into memory, if present.
+    fn load_settings_from_db(&self) {
+        let text: Option<String> = {
+            let conn = self.db.lock();
+            conn.query_row("SELECT v FROM settings WHERE k=0", [], |r| r.get(0))
+                .ok()
         };
-        match serde_json::from_str::<Settings>(&text) {
-            Ok(s) => {
-                *self.settings.write() = s;
+        if let Some(text) = text {
+            match serde_json::from_str::<Settings>(&text) {
+                Ok(s) => *self.settings.write() = s,
+                Err(e) => println!("[store] db: settings parse: {e}"),
             }
-            Err(e) => println!("[store] settings load failed: {}", e),
         }
     }
 
     // ---------- captured credentials ----------
     /// Record a captured credential, DEDUPED. Identity = (scheme, username,
     /// password for Basic | response for Digest). On a repeat we bump `count`
-    /// and refresh `last`; we never append a duplicate row (in memory or to
-    /// captures.jsonl). A genuinely new credential is pushed (count=1,
-    /// first=last=now) and appended once to the durable log. The deduped
-    /// in-memory list (global + per-device) is capped at ~200 distinct creds.
+    /// and refresh `last`; we never append a duplicate row (in memory or in the
+    /// DB). A genuinely new credential is pushed (count=1, first=last=now). The
+    /// deduped in-memory list (global + per-device) is capped at ~200 distinct
+    /// creds. Both the global ('' device_key) and the per-device records are
+    /// UPSERTed into the `captures` table (PK dedups; `data` holds the full,
+    /// count-bumped JSON). The new-credential JSON is also appended once to the
+    /// legacy captures.jsonl so external tooling that tails it keeps working.
     pub fn add_capture(&self, key: &str, rec: Value) {
         let now = now_iso();
         let (scheme, username, identity) = capture_identity(&rec);
-        // `is_new` decides whether we touch the durable log (only NEW creds).
+        // `new_record` decides whether we append to captures.jsonl (only NEW).
         let mut new_record: Option<Value> = None;
+        // Snapshots of the (possibly bumped) records to write through to SQLite.
+        // `global_persist` is assigned in every branch below (deferred init).
+        let global_persist: Value;
+        let mut device_persist: Option<Value> = None;
         {
             let mut g = self.inner.lock();
             // Global list: dedup or insert.
@@ -690,6 +845,7 @@ impl Store {
                 .find(|c| capture_matches(c, &scheme, &username, &identity))
             {
                 bump_capture(existing, &now);
+                global_persist = existing.clone();
             } else {
                 let mut fresh = rec.clone();
                 {
@@ -705,6 +861,7 @@ impl Store {
                     let start = g.captures.len() - 200;
                     g.captures.drain(0..start);
                 }
+                global_persist = fresh.clone();
                 new_record = Some(fresh);
             }
             // Per-device list: same dedup against this device's captures.
@@ -715,6 +872,7 @@ impl Store {
                     .find(|c| capture_matches(c, &scheme, &username, &identity))
                 {
                     bump_capture(existing, &now);
+                    device_persist = Some(existing.clone());
                 } else {
                     let mut fresh = rec.clone();
                     {
@@ -725,15 +883,21 @@ impl Store {
                         obj.insert("last".to_string(), json!(now));
                         obj.insert("count".to_string(), json!(1u64));
                     }
-                    dev.captures.push(fresh);
+                    dev.captures.push(fresh.clone());
                     if dev.captures.len() > 200 {
                         let start = dev.captures.len() - 200;
                         dev.captures.drain(0..start);
                     }
+                    device_persist = Some(fresh);
                 }
             }
         }
-        // Append to the durable log ONLY for a genuinely new unique credential.
+        // Write through to SQLite: global record keyed by '' + per-device record.
+        self.db_upsert_capture("", &scheme, &username, &identity, &global_persist);
+        if let Some(rec) = &device_persist {
+            self.db_upsert_capture(key, &scheme, &username, &identity, rec);
+        }
+        // Append to captures.jsonl ONLY for a genuinely new unique credential.
         if let Some(rec) = new_record {
             let line = format!("{}\n", serde_json::to_string(&rec).unwrap_or_default());
             let _ = std::fs::OpenOptions::new()
@@ -747,8 +911,29 @@ impl Store {
         }
     }
 
-    /// Clear all captured credentials: global list, every device's list, and
-    /// truncate captures.jsonl on disk (kept as an empty file).
+    /// UPSERT one capture row (PK = device_key,scheme,username,secret).
+    fn db_upsert_capture(
+        &self,
+        device_key: &str,
+        scheme: &str,
+        username: &str,
+        secret: &str,
+        rec: &Value,
+    ) {
+        let data = serde_json::to_string(rec).unwrap_or_default();
+        if let Err(e) = self.db.lock().execute(
+            "INSERT INTO captures(device_key,scheme,username,secret,data)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(device_key,scheme,username,secret) DO UPDATE SET data=excluded.data",
+            rusqlite::params![device_key, scheme, username, secret, data],
+        ) {
+            println!("[store] db: capture upsert: {e}");
+        }
+    }
+
+    /// Clear all captured credentials: global list, every device's list, the
+    /// durable `captures` table, and truncate captures.jsonl on disk (kept as
+    /// an empty file).
     pub fn captures_clear(&self) {
         {
             let mut g = self.inner.lock();
@@ -757,13 +942,21 @@ impl Store {
                 dev.captures.clear();
             }
         }
+        if let Err(e) = self.db.lock().execute("DELETE FROM captures", []) {
+            println!("[store] db: captures clear: {e}");
+        }
         let _ = std::fs::write(&self.captures_path, b"");
     }
 
-    /// Clear the in-memory event log.
+    /// Clear the in-memory event log and the durable `events` table.
     pub fn log_clear(&self) {
-        let mut g = self.inner.lock();
-        g.log.clear();
+        {
+            let mut g = self.inner.lock();
+            g.log.clear();
+        }
+        if let Err(e) = self.db.lock().execute("DELETE FROM events", []) {
+            println!("[store] db: events clear: {e}");
+        }
     }
 
     // ---------- discovery walks ----------
@@ -815,6 +1008,23 @@ impl Store {
                 g.log.drain(0..start);
             }
         }
+        // Persist to the durable `events` table and prune to the newest rows.
+        {
+            let conn = self.db.lock();
+            let r = conn.execute(
+                "INSERT INTO events(ts,device_key,level,message) VALUES (?1,?2,?3,?4)",
+                rusqlite::params![ts, key, level, msg],
+            );
+            if let Err(e) = r {
+                println!("[store] db: event insert: {e}");
+            } else if let Err(e) = conn.execute(
+                "DELETE FROM events WHERE id NOT IN
+                 (SELECT id FROM events ORDER BY id DESC LIMIT ?1)",
+                rusqlite::params![EVENT_DB_CAP],
+            ) {
+                println!("[store] db: event prune: {e}");
+            }
+        }
         let kp = key.map(|k| format!("[{}] ", k)).unwrap_or_default();
         println!("[{}] {}{}", ts, kp, msg);
     }
@@ -828,12 +1038,17 @@ impl Store {
     where
         F: FnOnce(&mut Device) -> R,
     {
-        let mut g = self.inner.lock();
-        let dev = g
-            .devices
-            .entry(key.to_string())
-            .or_insert_with(|| Device::new(key));
-        f(dev)
+        let (r, snapshot) = {
+            let mut g = self.inner.lock();
+            let dev = g
+                .devices
+                .entry(key.to_string())
+                .or_insert_with(|| Device::new(key));
+            let r = f(dev);
+            (r, dev.clone())
+        };
+        self.persist_device(&snapshot);
+        r
     }
 
     pub fn list_views(&self) -> Vec<Value> {
@@ -873,28 +1088,37 @@ impl Store {
     pub fn enqueue(&self, key: &str, task: Task) -> u64 {
         let id = task.id;
         let label = task.label.clone();
-        {
+        let snapshot = {
             let mut g = self.inner.lock();
             let dev = g
                 .devices
                 .entry(key.to_string())
                 .or_insert_with(|| Device::new(key));
             dev.queue.push(task);
-        }
+            dev.clone()
+        };
+        self.persist_device(&snapshot);
         self.event(&format!("queued task #{} {}", id, label), Some(key), "info");
         id
     }
 
     pub fn pop_next(&self, key: &str) -> Option<Task> {
-        let mut g = self.inner.lock();
-        let dev = g.devices.get_mut(key)?;
-        if dev.queue.is_empty() {
-            return None;
-        }
-        let mut t = dev.queue.remove(0);
-        t.status = "inflight".to_string();
-        t.updated = now_iso();
-        Some(t)
+        let (task, snapshot) = {
+            let mut g = self.inner.lock();
+            let dev = g.devices.get_mut(key)?;
+            if dev.queue.is_empty() {
+                return None;
+            }
+            let mut t = dev.queue.remove(0);
+            t.status = "inflight".to_string();
+            t.updated = now_iso();
+            (t, dev.clone())
+        };
+        // Persist the queue minus the now-inflight task (inflight tasks live in
+        // the session's `inflight` slot and are not durably tracked — same
+        // semantics as before the SQLite migration).
+        self.persist_device(&snapshot);
+        Some(task)
     }
 
     pub fn finish_task(
@@ -905,7 +1129,7 @@ impl Store {
         result: Value,
         fault: Value,
     ) {
-        {
+        let snapshot = {
             let mut g = self.inner.lock();
             task.status = status.to_string();
             task.result = result;
@@ -917,9 +1141,14 @@ impl Store {
                     let start = dev.history.len() - 500;
                     dev.history.drain(0..start);
                 }
+                Some(dev.clone())
+            } else {
+                None
             }
+        };
+        if let Some(dev) = snapshot {
+            self.persist_device(&dev);
         }
-        self.save();
     }
 
     pub fn pending_count(&self, key: &str) -> usize {
@@ -929,101 +1158,568 @@ impl Store {
 
     // ---------- parameter cache ----------
     pub fn update_parameters(&self, key: &str, pairs: &[crate::cwmp::ParamValue]) {
-        let mut g = self.inner.lock();
-        let dev = g
-            .devices
-            .entry(key.to_string())
-            .or_insert_with(|| Device::new(key));
-        let ts = now_iso();
-        for p in pairs {
-            let ent = dev.parameters.entry(p.name.clone()).or_default();
-            ent.value = p.value.clone();
-            ent.type_ = p.type_.clone();
-            ent.ts = ts.clone();
-        }
+        let snapshot = {
+            let mut g = self.inner.lock();
+            let dev = g
+                .devices
+                .entry(key.to_string())
+                .or_insert_with(|| Device::new(key));
+            let ts = now_iso();
+            for p in pairs {
+                let ent = dev.parameters.entry(p.name.clone()).or_default();
+                ent.value = p.value.clone();
+                ent.type_ = p.type_.clone();
+                ent.ts = ts.clone();
+            }
+            dev.clone()
+        };
+        self.persist_device(&snapshot);
     }
 
     pub fn update_names(&self, key: &str, names: &[crate::cwmp::ParamName]) {
-        let mut g = self.inner.lock();
-        let dev = g
-            .devices
-            .entry(key.to_string())
-            .or_insert_with(|| Device::new(key));
-        let ts = now_iso();
-        for n in names {
-            let ent = dev.parameters.entry(n.name.clone()).or_default();
-            ent.writable = Some(n.writable.clone());
-            ent.ts = ts.clone();
-        }
+        let snapshot = {
+            let mut g = self.inner.lock();
+            let dev = g
+                .devices
+                .entry(key.to_string())
+                .or_insert_with(|| Device::new(key));
+            let ts = now_iso();
+            for n in names {
+                let ent = dev.parameters.entry(n.name.clone()).or_default();
+                ent.writable = Some(n.writable.clone());
+                ent.ts = ts.clone();
+            }
+            dev.clone()
+        };
+        self.persist_device(&snapshot);
     }
 
     pub fn update_attributes(&self, key: &str, attrs: &[crate::cwmp::ParamAttr]) {
-        let mut g = self.inner.lock();
-        let dev = g
-            .devices
-            .entry(key.to_string())
-            .or_insert_with(|| Device::new(key));
-        for a in attrs {
-            dev.attributes.insert(
-                a.name.clone(),
-                AttrEntry {
-                    notification: a.notification.clone(),
-                    access_list: a.access_list.clone(),
-                },
-            );
-        }
+        let snapshot = {
+            let mut g = self.inner.lock();
+            let dev = g
+                .devices
+                .entry(key.to_string())
+                .or_insert_with(|| Device::new(key));
+            for a in attrs {
+                dev.attributes.insert(
+                    a.name.clone(),
+                    AttrEntry {
+                        notification: a.notification.clone(),
+                        access_list: a.access_list.clone(),
+                    },
+                );
+            }
+            dev.clone()
+        };
+        self.persist_device(&snapshot);
     }
 
     pub fn set_rpc_methods(&self, key: &str, methods: Vec<String>) {
-        let mut g = self.inner.lock();
-        if let Some(dev) = g.devices.get_mut(key) {
-            dev.rpc_methods = methods;
+        let snapshot = {
+            let mut g = self.inner.lock();
+            match g.devices.get_mut(key) {
+                Some(dev) => {
+                    dev.rpc_methods = methods;
+                    Some(dev.clone())
+                }
+                None => None,
+            }
+        };
+        if let Some(dev) = snapshot {
+            self.persist_device(&dev);
         }
     }
 
     // ---------- persistence ----------
-    pub fn save(&self) {
-        let data = {
-            let g = self.inner.lock();
-            let devices: Vec<Value> = g.devices.values().map(|d| d.to_persist()).collect();
-            json!({ "devices": devices })
+    /// Snapshot ONE device into SQLite in a single transaction: UPSERT the
+    /// device row + all its parameters + all its attributes, then replace its
+    /// task rows (DELETE then re-INSERT the queue (queued=1) + history
+    /// (queued=0)). Best-effort: any failure is logged and ignored.
+    fn persist_device(&self, dev: &Device) {
+        let mut conn = self.db.lock();
+        let tx = match conn.transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                println!("[store] db: begin tx: {e}");
+                return;
+            }
         };
-        let tmp = self.path.with_extension("json.tmp");
-        let serialized = serde_json::to_string_pretty(&data).unwrap_or_default();
-        match std::fs::write(&tmp, serialized) {
-            Ok(_) => {
-                if let Err(e) = std::fs::rename(&tmp, &self.path) {
-                    println!("[store] save failed: {}", e);
+        let r = (|| -> rusqlite::Result<()> {
+            let last_inform = serde_json::to_string(&dev.last_inform).unwrap_or_default();
+            let rpc_methods = serde_json::to_string(&dev.rpc_methods).unwrap_or_default();
+            tx.execute(
+                "INSERT INTO devices
+                   (key,oui,serial,product_class,manufacturer,model,software_version,
+                    ip,cwmp_ns,root,connection_request_url,last_inform,last_seen,rpc_methods)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                 ON CONFLICT(key) DO UPDATE SET
+                    oui=excluded.oui, serial=excluded.serial,
+                    product_class=excluded.product_class, manufacturer=excluded.manufacturer,
+                    model=excluded.model, software_version=excluded.software_version,
+                    ip=excluded.ip, cwmp_ns=excluded.cwmp_ns, root=excluded.root,
+                    connection_request_url=excluded.connection_request_url,
+                    last_inform=excluded.last_inform, last_seen=excluded.last_seen,
+                    rpc_methods=excluded.rpc_methods",
+                rusqlite::params![
+                    dev.key,
+                    dev.oui,
+                    dev.serial,
+                    dev.product_class,
+                    dev.manufacturer,
+                    dev.model,
+                    dev.software_version,
+                    dev.ip,
+                    dev.cwmp_ns,
+                    dev.root,
+                    dev.connection_request_url,
+                    last_inform,
+                    dev.last_seen,
+                    rpc_methods,
+                ],
+            )?;
+            // parameters: UPSERT each (don't delete others — params only grow).
+            for (name, ent) in &dev.parameters {
+                tx.execute(
+                    "INSERT INTO parameters(device_key,name,value,type,writable,ts)
+                     VALUES (?1,?2,?3,?4,?5,?6)
+                     ON CONFLICT(device_key,name) DO UPDATE SET
+                        value=excluded.value, type=excluded.type,
+                        writable=excluded.writable, ts=excluded.ts",
+                    rusqlite::params![dev.key, name, ent.value, ent.type_, ent.writable, ent.ts,],
+                )?;
+            }
+            // attributes: UPSERT each.
+            for (name, ent) in &dev.attributes {
+                let access = serde_json::to_string(&ent.access_list).unwrap_or_default();
+                tx.execute(
+                    "INSERT INTO attributes(device_key,name,notification,access_list)
+                     VALUES (?1,?2,?3,?4)
+                     ON CONFLICT(device_key,name) DO UPDATE SET
+                        notification=excluded.notification, access_list=excluded.access_list",
+                    rusqlite::params![dev.key, name, ent.notification, access],
+                )?;
+            }
+            // tasks: replace this device's set with its current queue + history.
+            tx.execute(
+                "DELETE FROM tasks WHERE device_key=?1",
+                rusqlite::params![dev.key],
+            )?;
+            for t in &dev.queue {
+                let data = serde_json::to_string(&t.to_persist()).unwrap_or_default();
+                tx.execute(
+                    "INSERT OR REPLACE INTO tasks(id,device_key,queued,data,created,updated)
+                     VALUES (?1,?2,1,?3,?4,?5)",
+                    rusqlite::params![t.id as i64, dev.key, data, t.created, t.updated],
+                )?;
+            }
+            for t in &dev.history {
+                let data = serde_json::to_string(&t.to_persist()).unwrap_or_default();
+                tx.execute(
+                    "INSERT OR REPLACE INTO tasks(id,device_key,queued,data,created,updated)
+                     VALUES (?1,?2,0,?3,?4,?5)",
+                    rusqlite::params![t.id as i64, dev.key, data, t.created, t.updated],
+                )?;
+            }
+            Ok(())
+        })();
+        match r {
+            Ok(()) => {
+                if let Err(e) = tx.commit() {
+                    println!("[store] db: commit: {e}");
                 }
             }
-            Err(e) => println!("[store] save failed: {}", e),
+            Err(e) => {
+                println!("[store] db: persist_device {}: {e}", dev.key);
+                // tx drops -> rollback
+            }
         }
     }
 
-    fn load(&self) {
-        if !self.path.exists() {
+    /// Persist EVERY in-memory device to SQLite (used by `save()` so existing
+    /// callers that expect a full flush keep working; e.g. graceful shutdown).
+    pub fn save(&self) {
+        let devices: Vec<Device> = {
+            let g = self.inner.lock();
+            g.devices.values().cloned().collect()
+        };
+        for dev in &devices {
+            self.persist_device(dev);
+        }
+    }
+
+    /// One-time legacy-JSON migration: only runs when the DB has no devices and
+    /// no settings yet. Imports devices.json -> devices/params/attrs,
+    /// captures.jsonl -> captures, settings.json -> settings, then renames each
+    /// imported file to `<name>.bak` so the import happens exactly once.
+    fn migrate_legacy_if_empty(&self) {
+        let empty = {
+            let conn = self.db.lock();
+            let dev_n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0))
+                .unwrap_or(0);
+            let set_n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))
+                .unwrap_or(0);
+            dev_n == 0 && set_n == 0
+        };
+        if !empty {
             return;
         }
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(t) => t,
-            Err(e) => {
-                println!("[store] load failed: {}", e);
-                return;
+
+        // --- devices.json ---
+        if self.path.exists()
+            && let Ok(text) = std::fs::read_to_string(&self.path)
+            && let Ok(data) = serde_json::from_str::<Value>(&text)
+        {
+            if let Some(arr) = data.get("devices").and_then(|v| v.as_array()) {
+                for d in arr {
+                    let dev = Device::from_persist(d);
+                    self.persist_device(&dev);
+                }
+                println!("[store] migrated {} device(s) from devices.json", arr.len());
             }
-        };
-        let data: Value = match serde_json::from_str(&text) {
-            Ok(d) => d,
-            Err(e) => {
-                println!("[store] load failed: {}", e);
-                return;
+            let _ = std::fs::rename(&self.path, self.path.with_extension("json.bak"));
+        }
+
+        // --- captures.jsonl ---
+        if self.captures_path.exists()
+            && let Ok(text) = std::fs::read_to_string(&self.captures_path)
+        {
+            let mut n = 0u64;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(rec) = serde_json::from_str::<Value>(line) {
+                    let (scheme, username, secret) = capture_identity(&rec);
+                    let dk = rec
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    // global '' record + per-device record (PK dedups repeats)
+                    self.db_upsert_capture("", &scheme, &username, &secret, &rec);
+                    if !dk.is_empty() {
+                        self.db_upsert_capture(&dk, &scheme, &username, &secret, &rec);
+                    }
+                    n += 1;
+                }
             }
-        };
+            if n > 0 {
+                println!("[store] migrated {n} capture(s) from captures.jsonl");
+            }
+            let bak = self.captures_path.with_extension("jsonl.bak");
+            let _ = std::fs::rename(&self.captures_path, bak);
+        }
+
+        // --- settings.json ---
+        if self.settings_path.exists()
+            && let Ok(text) = std::fs::read_to_string(&self.settings_path)
+            && let Ok(s) = serde_json::from_str::<Settings>(&text)
+        {
+            let data = serde_json::to_string(&s).unwrap_or_default();
+            if let Err(e) = self.db.lock().execute(
+                "INSERT INTO settings(k,v) VALUES (0,?1)
+                 ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                rusqlite::params![data],
+            ) {
+                println!("[store] db: settings migrate: {e}");
+            } else {
+                println!("[store] migrated settings.json");
+            }
+            let _ = std::fs::rename(
+                &self.settings_path,
+                self.settings_path.with_extension("json.bak"),
+            );
+        }
+    }
+
+    /// Load ALL durable state from SQLite into the in-memory model: devices (+
+    /// parameters, attributes, rpc_methods, queue/history tasks), captured
+    /// credentials (global + per-device), the event log, the wire ring buffer,
+    /// and settings. Also advances TASK_SEQ / wire_seq past the loaded maxima.
+    fn load_from_db(&self) {
+        // settings first (so seed is overridden by persisted values).
+        self.load_settings_from_db();
+
+        let mut max_task_id: u64 = 0;
+        let mut max_wire_id: u64 = 0;
         let mut g = self.inner.lock();
-        if let Some(arr) = data.get("devices").and_then(|v| v.as_array()) {
-            for d in arr {
-                let dev = Device::from_persist(d);
-                g.devices.insert(dev.key.clone(), dev);
+        let conn = self.db.lock();
+
+        // --- devices ---
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT key,oui,serial,product_class,manufacturer,model,software_version,
+                    ip,cwmp_ns,root,connection_request_url,last_inform,last_seen,rpc_methods
+             FROM devices",
+        ) {
+            let rows = stmt.query_map([], |row| {
+                let mut dev = Device::new(&row.get::<_, String>(0)?);
+                dev.oui = row.get(1)?;
+                dev.serial = row.get(2)?;
+                dev.product_class = row.get(3)?;
+                dev.manufacturer = row.get(4)?;
+                dev.model = row.get(5)?;
+                dev.software_version = row.get(6)?;
+                dev.ip = row.get(7)?;
+                dev.cwmp_ns = row.get(8)?;
+                dev.root = row.get(9)?;
+                dev.connection_request_url = row.get(10)?;
+                let li: String = row.get(11)?;
+                dev.last_inform = serde_json::from_str(&li).unwrap_or(Value::Null);
+                dev.last_seen = row.get(12)?;
+                let rm: String = row.get(13)?;
+                dev.rpc_methods = serde_json::from_str(&rm).unwrap_or_default();
+                Ok(dev)
+            });
+            if let Ok(rows) = rows {
+                for dev in rows.flatten() {
+                    g.devices.insert(dev.key.clone(), dev);
+                }
             }
         }
+
+        // --- parameters ---
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT device_key,name,value,type,writable,ts FROM parameters")
+        {
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    ParamEntry {
+                        value: row.get(2)?,
+                        type_: row.get(3)?,
+                        writable: row.get(4)?,
+                        ts: row.get(5)?,
+                    },
+                ))
+            });
+            if let Ok(rows) = rows {
+                for (dk, name, ent) in rows.flatten() {
+                    if let Some(dev) = g.devices.get_mut(&dk) {
+                        dev.parameters.insert(name, ent);
+                    }
+                }
+            }
+        }
+
+        // --- attributes ---
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT device_key,name,notification,access_list FROM attributes")
+        {
+            let rows = stmt.query_map([], |row| {
+                let access: String = row.get(3)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    AttrEntry {
+                        notification: row.get(2)?,
+                        access_list: serde_json::from_str(&access).unwrap_or_default(),
+                    },
+                ))
+            });
+            if let Ok(rows) = rows {
+                for (dk, name, ent) in rows.flatten() {
+                    if let Some(dev) = g.devices.get_mut(&dk) {
+                        dev.attributes.insert(name, ent);
+                    }
+                }
+            }
+        }
+
+        // --- tasks (queue: queued=1, history: queued=0) ---
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT device_key,queued,data FROM tasks ORDER BY id ASC")
+        {
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            });
+            if let Ok(rows) = rows {
+                for (dk, queued, data) in rows.flatten() {
+                    if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                        let task = Task::from_persist(&v);
+                        max_task_id = max_task_id.max(task.id);
+                        if let Some(dev) = g.devices.get_mut(&dk) {
+                            if queued == 1 {
+                                dev.queue.push(task);
+                            } else {
+                                dev.history.push(task);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- captures (global '' list + per-device lists) ---
+        if let Ok(mut stmt) = conn.prepare("SELECT device_key,data FROM captures") {
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            });
+            if let Ok(rows) = rows {
+                for (dk, data) in rows.flatten() {
+                    if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                        if dk.is_empty() {
+                            g.captures.push(v);
+                        } else if let Some(dev) = g.devices.get_mut(&dk) {
+                            dev.captures.push(v);
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- events (most recent EVENT_DB_CAP, oldest-first into the log) ---
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT ts,device_key,level,message FROM events ORDER BY id ASC LIMIT ?1")
+        {
+            let rows = stmt.query_map(rusqlite::params![EVENT_DB_CAP], |row| {
+                let dk: Option<String> = row.get(1)?;
+                Ok(LogEntry {
+                    ts: row.get(0)?,
+                    key: dk,
+                    level: row.get(2)?,
+                    msg: row.get(3)?,
+                })
+            });
+            if let Ok(rows) = rows {
+                for e in rows.flatten() {
+                    g.log.push(e);
+                }
+            }
+        }
+
+        // --- wire ring (newest WIRE_CAP frames, oldest-first) ---
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id,ts,dir,client_ip,session_key,summary,headers,body
+             FROM wire ORDER BY id DESC LIMIT ?1",
+        ) {
+            let rows = stmt.query_map(rusqlite::params![WIRE_CAP as i64], |row| {
+                let id: i64 = row.get(0)?;
+                let headers: String = row.get(6)?;
+                Ok(WireEntry {
+                    id: id as u64,
+                    ts: row.get(1)?,
+                    dir: row.get(2)?,
+                    client_ip: row.get(3)?,
+                    session_key: row.get(4)?,
+                    summary: row.get(5)?,
+                    headers: serde_json::from_str(&headers).unwrap_or_default(),
+                    body: row.get(7)?,
+                })
+            });
+            if let Ok(rows) = rows {
+                let mut frames: Vec<WireEntry> = rows.flatten().collect();
+                frames.reverse(); // we selected DESC; restore oldest-first order
+                let mut q = self.wire.lock();
+                for f in frames {
+                    max_wire_id = max_wire_id.max(f.id);
+                    q.push_back(f);
+                }
+            }
+        }
+        // The LIMIT above caps the ring, but the true max wire id may be higher
+        // (older rows beyond WIRE_CAP). Read it directly so ids never collide.
+        if let Ok(m) = conn.query_row("SELECT COALESCE(MAX(id),0) FROM wire", [], |r| {
+            r.get::<_, i64>(0)
+        }) {
+            max_wire_id = max_wire_id.max(m as u64);
+        }
+
+        drop(conn);
+        drop(g);
+
+        // Advance the id sequences past everything loaded.
+        bump_task_seq(max_task_id);
+        let want_wire = max_wire_id + 1;
+        let cur = self.wire_seq.load(Ordering::SeqCst);
+        if cur < want_wire {
+            self.wire_seq.store(want_wire, Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trip: a device + param + queued task + event written by one Store
+    /// must survive being dropped and reloaded by a fresh Store on the same dir.
+    #[test]
+    fn persistence_round_trip() {
+        let dir = std::env::temp_dir().join(format!("acs_store_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let devices_path = dir.join("devices.json");
+        let captures_path = dir.join("captures.jsonl");
+        let settings_path = dir.join("settings.json");
+        let key = "00227F-ROUNDTRIP01";
+
+        {
+            let store = Store::new(
+                devices_path.clone(),
+                captures_path.clone(),
+                settings_path.clone(),
+                Settings::default(),
+                "127.0.0.1".to_string(),
+                false,
+            );
+            store.get_or_create(key, |dev| {
+                dev.oui = "00227F".to_string();
+                dev.serial = "ROUNDTRIP01".to_string();
+                dev.model = "RV6699".to_string();
+            });
+            store.update_parameters(
+                key,
+                &[crate::cwmp::ParamValue {
+                    name: "InternetGatewayDevice.DeviceInfo.UpTime".to_string(),
+                    value: "12345".to_string(),
+                    type_: "xsd:unsignedInt".to_string(),
+                }],
+            );
+            let t = Task::new("get", json!({"names": ["X."]}), Some("probe"), None, 0);
+            store.enqueue(key, t);
+            store.event_info("round-trip event", Some(key));
+            // store dropped here -> connection closed
+        }
+
+        let store2 = Store::new(
+            devices_path,
+            captures_path,
+            settings_path,
+            Settings::default(),
+            "127.0.0.1".to_string(),
+            false,
+        );
+        let detail = store2.device_detail(key).expect("device should reload");
+        assert_eq!(detail.get("key").and_then(|v| v.as_str()), Some(key));
+        assert_eq!(detail.get("model").and_then(|v| v.as_str()), Some("RV6699"));
+        let params = detail.get("parameters").and_then(|v| v.as_array()).unwrap();
+        assert!(
+            params.iter().any(|p| p.get("name").and_then(|v| v.as_str())
+                == Some("InternetGatewayDevice.DeviceInfo.UpTime")),
+            "param should reload"
+        );
+        let queue = detail.get("queue").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(queue.len(), 1, "queued task should reload");
+        assert_eq!(
+            queue[0].get("label").and_then(|v| v.as_str()),
+            Some("probe")
+        );
+        let log = store2.log_tail(50);
+        assert!(
+            log.iter()
+                .any(|e| e.get("msg").and_then(|v| v.as_str()) == Some("round-trip event")),
+            "event should reload"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
