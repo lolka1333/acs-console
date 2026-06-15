@@ -692,6 +692,19 @@ fn handle_inform(
             s
         }
     };
+    // Drop Informs whose OUI isn't a real 6-hex-digit IEEE OUI. Internet scanners
+    // probing the public :7547 send garbage DeviceIds (e.g. "DISCOVERYSERVICE");
+    // rejecting them keeps fake devices out of the list and off the session
+    // machinery. A 6-hex OUI is mandatory in TR-069, so genuine CPEs (and the
+    // selftest, which uses real OUIs) are unaffected.
+    if oui.len() != 6 || !oui.chars().all(|c| c.is_ascii_hexdigit()) {
+        store.event(
+            &format!("dropped Inform from bogus OUI {oui:?} (serial {serial:?})"),
+            None,
+            "warn",
+        );
+        return send_end();
+    }
     let key = format!("{}-{}", oui, serial);
     *sess_key = Some(key.clone());
 

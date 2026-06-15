@@ -15,6 +15,7 @@ mod store;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::response::IntoResponse;
 use axum::{
@@ -23,7 +24,9 @@ use axum::{
 };
 use clap::Parser;
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
+use tower_http::timeout::TimeoutLayer;
 
 use config::Config;
 use console::ConsoleState;
@@ -241,6 +244,14 @@ async fn main() {
         .route("/", get(cpe_server::cwmp_get).post(cpe_server::cwmp_post))
         // any path is the CWMP endpoint for POST; GET = health
         .fallback(get(cpe_server::cwmp_get).post(cpe_server::cwmp_post))
+        // Harden the internet-exposed :7547 against scanners/slow-loris: cap the
+        // request body (real Informs are a few KB) and time out stuck requests so a
+        // hostile/half-open connection can't pile up and wedge the listener.
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ))
+        .layer(RequestBodyLimitLayer::new(256 * 1024))
         .with_state(cpe_state);
 
     // ---- Console server (REST + files + static UI) ----
