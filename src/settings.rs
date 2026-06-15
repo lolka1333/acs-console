@@ -1,8 +1,8 @@
 //! settings.rs — runtime-mutable ACS settings, persisted in the SQLite store (acs.db).
 //!
 //! These fields are editable live from the web console (PUT /api/settings) and
-//! survive restarts. The startup seed comes from the CLI/env (config.rs); if a
-//! settings.json already exists it overrides the seed so UI changes win.
+//! survive restarts. The startup seed comes from the CLI/env (config.rs); a row
+//! persisted in acs.db (if present) overrides the seed so UI changes win.
 
 use serde::{Deserialize, Serialize};
 
