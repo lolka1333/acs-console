@@ -4,9 +4,7 @@
 //! persist incrementally to an embedded SQLite database (`acs.db`) in the data
 //! dir. The in-memory model is kept as the single source of truth for reads; we
 //! write through to SQLite on every mutation (best-effort — DB errors are
-//! logged, never fatal). On first run we migrate any legacy JSON files
-//! (devices.json / captures.jsonl / settings.json) into the DB and rename them
-//! `.bak` so the import happens exactly once.
+//! logged, never fatal). The SQLite database is the sole durable store.
 
 use parking_lot::{Mutex, RwLock};
 use rusqlite::Connection;
@@ -312,73 +310,6 @@ impl Device {
         })
     }
 
-    pub fn from_persist(d: &Value) -> Device {
-        let key = d
-            .get("key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let mut dev = Device::new(&key);
-        let gs = |k: &str| d.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
-        if let Some(v) = gs("oui") {
-            dev.oui = v;
-        }
-        if let Some(v) = gs("serial") {
-            dev.serial = v;
-        }
-        if let Some(v) = gs("product_class") {
-            dev.product_class = v;
-        }
-        if let Some(v) = gs("manufacturer") {
-            dev.manufacturer = v;
-        }
-        if let Some(v) = gs("model") {
-            dev.model = v;
-        }
-        if let Some(v) = gs("software_version") {
-            dev.software_version = v;
-        }
-        if let Some(v) = gs("ip") {
-            dev.ip = v;
-        }
-        if let Some(v) = gs("cwmp_ns") {
-            dev.cwmp_ns = v;
-        }
-        if let Some(v) = gs("root") {
-            dev.root = v;
-        }
-        if let Some(v) = gs("connection_request_url") {
-            dev.connection_request_url = v;
-        }
-        if let Some(v) = gs("last_seen") {
-            dev.last_seen = v;
-        }
-        if let Some(v) = d.get("last_inform") {
-            dev.last_inform = v.clone();
-        }
-        if let Some(obj) = d.get("parameters").and_then(|v| v.as_object()) {
-            for (k, v) in obj {
-                if let Ok(pe) = serde_json::from_value::<ParamEntry>(v.clone()) {
-                    dev.parameters.insert(k.clone(), pe);
-                }
-            }
-        }
-        if let Some(obj) = d.get("attributes").and_then(|v| v.as_object()) {
-            for (k, v) in obj {
-                if let Ok(ae) = serde_json::from_value::<AttrEntry>(v.clone()) {
-                    dev.attributes.insert(k.clone(), ae);
-                }
-            }
-        }
-        if let Some(arr) = d.get("rpc_methods").and_then(|v| v.as_array()) {
-            dev.rpc_methods = arr
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-        }
-        dev
-    }
-
     pub fn to_view(&self) -> Value {
         let mut v = self.to_persist();
         let obj = v.as_object_mut().unwrap();
@@ -478,9 +409,6 @@ struct Inner {
 }
 
 pub struct Store {
-    path: std::path::PathBuf,
-    captures_path: std::path::PathBuf,
-    settings_path: std::path::PathBuf,
     /// Embedded SQLite connection (the durable store of record). Wrapped in a
     /// Mutex so the synchronous rusqlite handle is shared safely across tasks.
     db: Mutex<Connection>,
@@ -564,30 +492,17 @@ fn open_db(path: &std::path::Path) -> Connection {
 }
 
 impl Store {
-    /// `seed` is the startup settings (from CLI/env). If settings.json exists at
-    /// `settings_path` it overrides the seed (UI changes win and persist).
-    #[allow(clippy::too_many_arguments)]
+    /// `seed` is the startup settings (from CLI/env). Persisted settings live in
+    /// `<data_dir>/acs.db` and override the seed (UI changes win and persist).
     pub fn new(
-        path: std::path::PathBuf,
-        captures_path: std::path::PathBuf,
-        settings_path: std::path::PathBuf,
+        data_dir: std::path::PathBuf,
         seed: Settings,
         advertise_ip: String,
         advertise_ip_explicit: bool,
     ) -> Store {
-        // acs.db lives in the data dir alongside settings.json (same parent).
-        let data_dir = settings_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let db_path = data_dir.join("acs.db");
-
-        let db = open_db(&db_path);
+        let db = open_db(&data_dir.join("acs.db"));
 
         let store = Store {
-            path,
-            captures_path,
-            settings_path,
             db: Mutex::new(db),
             inner: Mutex::new(Inner {
                 devices: BTreeMap::new(),
@@ -603,10 +518,8 @@ impl Store {
             advertise_ip,
             advertise_ip_explicit,
         };
-        // One-time legacy-JSON import (only when the DB is empty), then load all
-        // state (devices, params, attrs, tasks, captures, events, wire, settings)
-        // from the DB into memory.
-        store.migrate_legacy_if_empty();
+        // Load all state (devices, params, attrs, tasks, captures, events, wire,
+        // settings) from the DB into memory.
         store.load_from_db();
         store
     }
@@ -709,7 +622,7 @@ impl Store {
         f(&self.settings.read())
     }
 
-    /// Mutate the settings under the write lock, then persist to settings.json.
+    /// Mutate the settings under the write lock, then persist them to acs.db.
     /// The closure runs with the lock held; do NOT .await inside it.
     pub fn update_settings<F, R>(&self, f: F) -> R
     where
@@ -816,13 +729,10 @@ impl Store {
     /// deduped in-memory list (global + per-device) is capped at ~200 distinct
     /// creds. Both the global ('' device_key) and the per-device records are
     /// UPSERTed into the `captures` table (PK dedups; `data` holds the full,
-    /// count-bumped JSON). The new-credential JSON is also appended once to the
-    /// legacy captures.jsonl so external tooling that tails it keeps working.
+    /// count-bumped JSON).
     pub fn add_capture(&self, key: &str, rec: Value) {
         let now = now_iso();
         let (scheme, username, identity) = capture_identity(&rec);
-        // `new_record` decides whether we append to captures.jsonl (only NEW).
-        let mut new_record: Option<Value> = None;
         // Snapshots of the (possibly bumped) records to write through to SQLite.
         // `global_persist` is assigned in every branch below (deferred init).
         let global_persist: Value;
@@ -852,8 +762,7 @@ impl Store {
                     let start = g.captures.len() - 200;
                     g.captures.drain(0..start);
                 }
-                global_persist = fresh.clone();
-                new_record = Some(fresh);
+                global_persist = fresh;
             }
             // Per-device list: same dedup against this device's captures.
             if let Some(dev) = g.devices.get_mut(key) {
@@ -888,18 +797,6 @@ impl Store {
         if let Some(rec) = &device_persist {
             self.db_upsert_capture(key, &scheme, &username, &identity, rec);
         }
-        // Append to captures.jsonl ONLY for a genuinely new unique credential.
-        if let Some(rec) = new_record {
-            let line = format!("{}\n", serde_json::to_string(&rec).unwrap_or_default());
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.captures_path)
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    f.write_all(line.as_bytes())
-                });
-        }
     }
 
     /// UPSERT one capture row (PK = device_key,scheme,username,secret).
@@ -922,9 +819,8 @@ impl Store {
         }
     }
 
-    /// Clear all captured credentials: global list, every device's list, the
-    /// durable `captures` table, and truncate captures.jsonl on disk (kept as
-    /// an empty file).
+    /// Clear all captured credentials: global list, every device's list, and the
+    /// durable `captures` table.
     pub fn captures_clear(&self) {
         {
             let mut g = self.inner.lock();
@@ -936,7 +832,6 @@ impl Store {
         if let Err(e) = self.db.lock().execute("DELETE FROM captures", []) {
             println!("[store] db: captures clear: {e}");
         }
-        let _ = std::fs::write(&self.captures_path, b"");
     }
 
     /// Clear the in-memory event log and the durable `events` table.
@@ -1339,94 +1234,6 @@ impl Store {
         }
     }
 
-    /// One-time legacy-JSON migration: only runs when the DB has no devices and
-    /// no settings yet. Imports devices.json -> devices/params/attrs,
-    /// captures.jsonl -> captures, settings.json -> settings, then renames each
-    /// imported file to `<name>.bak` so the import happens exactly once.
-    fn migrate_legacy_if_empty(&self) {
-        let empty = {
-            let conn = self.db.lock();
-            let dev_n: i64 = conn
-                .query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0))
-                .unwrap_or(0);
-            let set_n: i64 = conn
-                .query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))
-                .unwrap_or(0);
-            dev_n == 0 && set_n == 0
-        };
-        if !empty {
-            return;
-        }
-
-        // --- devices.json ---
-        if self.path.exists()
-            && let Ok(text) = std::fs::read_to_string(&self.path)
-            && let Ok(data) = serde_json::from_str::<Value>(&text)
-        {
-            if let Some(arr) = data.get("devices").and_then(|v| v.as_array()) {
-                for d in arr {
-                    let dev = Device::from_persist(d);
-                    self.persist_device(&dev);
-                }
-                println!("[store] migrated {} device(s) from devices.json", arr.len());
-            }
-            let _ = std::fs::rename(&self.path, self.path.with_extension("json.bak"));
-        }
-
-        // --- captures.jsonl ---
-        if self.captures_path.exists()
-            && let Ok(text) = std::fs::read_to_string(&self.captures_path)
-        {
-            let mut n = 0u64;
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(rec) = serde_json::from_str::<Value>(line) {
-                    let (scheme, username, secret) = capture_identity(&rec);
-                    let dk = rec
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    // global '' record + per-device record (PK dedups repeats)
-                    self.db_upsert_capture("", &scheme, &username, &secret, &rec);
-                    if !dk.is_empty() {
-                        self.db_upsert_capture(&dk, &scheme, &username, &secret, &rec);
-                    }
-                    n += 1;
-                }
-            }
-            if n > 0 {
-                println!("[store] migrated {n} capture(s) from captures.jsonl");
-            }
-            let bak = self.captures_path.with_extension("jsonl.bak");
-            let _ = std::fs::rename(&self.captures_path, bak);
-        }
-
-        // --- settings.json ---
-        if self.settings_path.exists()
-            && let Ok(text) = std::fs::read_to_string(&self.settings_path)
-            && let Ok(s) = serde_json::from_str::<Settings>(&text)
-        {
-            let data = serde_json::to_string(&s).unwrap_or_default();
-            if let Err(e) = self.db.lock().execute(
-                "INSERT INTO settings(k,v) VALUES (0,?1)
-                 ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                rusqlite::params![data],
-            ) {
-                println!("[store] db: settings migrate: {e}");
-            } else {
-                println!("[store] migrated settings.json");
-            }
-            let _ = std::fs::rename(
-                &self.settings_path,
-                self.settings_path.with_extension("json.bak"),
-            );
-        }
-    }
-
     /// Load ALL durable state from SQLite into the in-memory model: devices (+
     /// parameters, attributes, rpc_methods, queue/history tasks), captured
     /// credentials (global + per-device), the event log, the wire ring buffer,
@@ -1648,16 +1455,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("acs_store_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let devices_path = dir.join("devices.json");
-        let captures_path = dir.join("captures.jsonl");
-        let settings_path = dir.join("settings.json");
         let key = "00227F-ROUNDTRIP01";
 
         {
             let store = Store::new(
-                devices_path.clone(),
-                captures_path.clone(),
-                settings_path.clone(),
+                dir.clone(),
                 Settings::default(),
                 "127.0.0.1".to_string(),
                 false,
@@ -1682,9 +1484,7 @@ mod tests {
         }
 
         let store2 = Store::new(
-            devices_path,
-            captures_path,
-            settings_path,
+            dir.clone(),
             Settings::default(),
             "127.0.0.1".to_string(),
             false,

@@ -61,18 +61,6 @@ impl Config {
         }
     }
 
-    pub fn devices_path(&self) -> std::path::PathBuf {
-        std::path::Path::new(&self.data_dir).join("devices.json")
-    }
-
-    pub fn captures_path(&self) -> std::path::PathBuf {
-        std::path::Path::new(&self.data_dir).join("captures.jsonl")
-    }
-
-    pub fn settings_path(&self) -> std::path::PathBuf {
-        std::path::Path::new(&self.data_dir).join("settings.json")
-    }
-
     /// Build a /files/<name> URL for the given advertise host (already :port-free).
     pub fn file_url(&self, host: &str, name: &str) -> String {
         format!("http://{}:{}/files/{}", host, self.console_port, name)

@@ -1,4 +1,4 @@
-//! settings.rs — runtime-mutable ACS settings, persisted to data/settings.json.
+//! settings.rs — runtime-mutable ACS settings, persisted in the SQLite store (acs.db).
 //!
 //! These fields are editable live from the web console (PUT /api/settings) and
 //! survive restarts. The startup seed comes from the CLI/env (config.rs); if a

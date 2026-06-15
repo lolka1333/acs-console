@@ -182,13 +182,13 @@ async fn main() {
     };
     cfg.ensure_dirs();
 
-    // Seed the runtime-mutable settings from CLI/env. settings.json (if present)
-    // overrides this inside Store::new, so prior UI changes win and persist.
+    // Seed the runtime-mutable settings from CLI/env. Persisted settings in
+    // acs.db override this inside Store::new, so prior UI changes win and persist.
     let seed = Settings {
         acs_username: cli.acs_user.clone(),
         acs_password: cli.acs_pass.clone(),
         console_username: cli.console_user.clone(),
-        // resolved below: CLI value wins; else settings.json; else generated
+        // resolved below: CLI value wins; else persisted acs.db; else generated
         console_password: cli.console_pass.clone().unwrap_or_default(),
         console_password_generated: false,
         capture: cli.capture,
@@ -200,9 +200,7 @@ async fn main() {
     };
 
     let store = Arc::new(Store::new(
-        cfg.devices_path(),
-        cfg.captures_path(),
-        cfg.settings_path(),
+        std::path::PathBuf::from(&cfg.data_dir),
         seed,
         cfg.advertise_ip.clone(),
         cfg.advertise_ip_explicit,
@@ -211,9 +209,9 @@ async fn main() {
 
     // --- secure first run: resolve the console password ---
     //   1. CONSOLE_PASS / --console-pass provided  -> use it,            generated=false
-    //   2. else settings.json already had one       -> keep it + its flag
+    //   2. else acs.db already had one              -> keep it + its flag
     //   3. else (nothing set)                        -> GENERATE one,    generated=true
-    // Step 2 already happened in Store::new (settings.json overrode the seed).
+    // Step 2 already happened in Store::new (acs.db overrode the seed).
     let mut generated_pass: Option<String> = None;
     if let Some(p) = cli.console_pass.clone() {
         // explicit override always wins and is never "generated"
@@ -232,7 +230,7 @@ async fn main() {
                 s.console_password_generated = true;
             });
         } else if cur.1 {
-            // a previously-generated password loaded from settings.json — surface
+            // a previously-generated password loaded from acs.db — surface
             // it again so the admin who missed the first log can still read it.
             generated_pass = Some(cur.0);
         }
