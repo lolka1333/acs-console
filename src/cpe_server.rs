@@ -275,7 +275,7 @@ pub async fn cwmp_post(
             &mut sess_cookie,
             &mut sess_seq,
         ),
-        "empty" => send_next_or_end(
+        "empty" => send_next(
             &store,
             sess_key.as_deref(),
             &sess_ns,
@@ -411,7 +411,7 @@ fn wire_log_in(
 /// Pick a short, telling local-name from a CWMP response body for the summary,
 /// e.g. "InformResponse" / "GetParameterValues" / "Fault". Searches inside the
 /// SOAP Body so the header's `cwmp:ID` element is never mistaken for the RPC.
-fn first_cwmp_localname(body: &str) -> Option<String> {
+fn body_rpc_name(body: &str) -> Option<String> {
     // Only look after the SOAP Body opening tag (any prefix, e.g. SOAP-ENV:Body).
     let scan = match body.find(":Body>").or_else(|| body.find("Body>")) {
         Some(i) => &body[i..],
@@ -462,7 +462,7 @@ async fn wire_log_out(
         "204 (session end)".to_string()
     } else if status == StatusCode::UNAUTHORIZED {
         "401 challenge".to_string()
-    } else if let Some(local) = first_cwmp_localname(&body_str) {
+    } else if let Some(local) = body_rpc_name(&body_str) {
         format!("{} {}", status.as_u16(), local)
     } else {
         format!(
@@ -832,7 +832,7 @@ fn handle_rpc_response(
             });
             store.finish_task(key, t, "fault", Value::Null, fault);
         }
-        return send_next_or_end(store, session_key, session_ns, seq, inflight);
+        return send_next(store, session_key, session_ns, seq, inflight);
     }
 
     if let Some(t) = task {
@@ -853,7 +853,7 @@ fn handle_rpc_response(
             expand_walk(store, key, wid, walk_depth, &path, msg);
         }
     }
-    send_next_or_end(store, session_key, session_ns, seq, inflight)
+    send_next(store, session_key, session_ns, seq, inflight)
 }
 
 fn absorb(store: &Store, key: &str, msg: &cwmp::ParsedMessage) -> Value {
@@ -946,7 +946,7 @@ fn expand_walk(
 }
 
 // ---------------- queue driver ----------------
-fn send_next_or_end(
+fn send_next(
     store: &Store,
     session_key: Option<&str>,
     session_ns: &str,

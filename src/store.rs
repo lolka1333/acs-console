@@ -90,7 +90,7 @@ fn bump_capture(rec: &mut Value, now: &str) {
 /// Dedup a capture into `list`: bump an existing match's count/`last`, else push
 /// a fresh record (count=1, first=last=now) and cap the list at `CAPTURE_CAP`.
 /// Returns the snapshot to persist. Runs under the caller's inner lock.
-fn capture_dedup_push(
+fn merge_capture(
     list: &mut Vec<Value>,
     scheme: &str,
     username: &str,
@@ -689,7 +689,7 @@ impl Store {
 
     /// The configured advertise_host, else the CPE-learned host — the two tiers
     /// shared by `advertise_host` and `advertise_effective`. None when neither set.
-    fn configured_or_learned(&self) -> Option<String> {
+    fn preferred_host(&self) -> Option<String> {
         let configured = self.with_settings(|s| s.advertise_host.trim().to_string());
         if !configured.is_empty() {
             return Some(configured);
@@ -706,7 +706,7 @@ impl Store {
     /// "explicit" and "auto-detected" tiers; `advertise_ip_explicit` only
     /// documents which one it is.
     pub fn advertise_host(&self) -> String {
-        self.configured_or_learned()
+        self.preferred_host()
             .unwrap_or_else(|| self.advertise_ip.clone())
     }
 
@@ -716,7 +716,7 @@ impl Store {
     /// "effective" until a CPE Informs or the admin sets it). Precedence:
     /// settings.advertise_host -> CPE-learned host -> explicit --advertise-ip.
     pub fn advertise_effective(&self) -> String {
-        self.configured_or_learned().unwrap_or_else(|| {
+        self.preferred_host().unwrap_or_else(|| {
             if self.advertise_ip_explicit {
                 self.advertise_ip.clone()
             } else {
@@ -773,7 +773,7 @@ impl Store {
         {
             let mut g = self.inner.lock();
             // Global list ('' device_key), then this device's list — same dedup.
-            global_persist = capture_dedup_push(
+            global_persist = merge_capture(
                 &mut g.captures,
                 &scheme,
                 &username,
@@ -783,7 +783,7 @@ impl Store {
                 rec.clone(),
             );
             if let Some(dev) = g.devices.get_mut(key) {
-                device_persist = Some(capture_dedup_push(
+                device_persist = Some(merge_capture(
                     &mut dev.captures,
                     &scheme,
                     &username,
