@@ -695,17 +695,19 @@ impl Store {
     /// the auto-detected LAN IP, so it serves as the final fallback for both the
     /// "explicit" and "auto-detected" tiers; `advertise_ip_explicit` only
     /// documents which one it is.
-    pub fn advertise_host(&self) -> String {
+    /// The configured advertise_host, else the CPE-learned host — the two tiers
+    /// shared by `advertise_host` and `advertise_effective`. None when neither set.
+    fn configured_or_learned(&self) -> Option<String> {
         let configured = self.with_settings(|s| s.advertise_host.trim().to_string());
         if !configured.is_empty() {
-            return configured;
+            return Some(configured);
         }
-        if let Some(h) = self.learned_host()
-            && !h.is_empty()
-        {
-            return h;
-        }
-        self.advertise_ip.clone()
+        self.learned_host().filter(|h| !h.is_empty())
+    }
+
+    pub fn advertise_host(&self) -> String {
+        self.configured_or_learned()
+            .unwrap_or_else(|| self.advertise_ip.clone())
     }
 
     /// The resolved advertise host to *report* in the API, or "" when nothing
@@ -714,19 +716,13 @@ impl Store {
     /// "effective" until a CPE Informs or the admin sets it). Precedence:
     /// settings.advertise_host -> CPE-learned host -> explicit --advertise-ip.
     pub fn advertise_effective(&self) -> String {
-        let configured = self.with_settings(|s| s.advertise_host.trim().to_string());
-        if !configured.is_empty() {
-            return configured;
-        }
-        if let Some(h) = self.learned_host()
-            && !h.is_empty()
-        {
-            return h;
-        }
-        if self.advertise_ip_explicit {
-            return self.advertise_ip.clone();
-        }
-        String::new()
+        self.configured_or_learned().unwrap_or_else(|| {
+            if self.advertise_ip_explicit {
+                self.advertise_ip.clone()
+            } else {
+                String::new()
+            }
+        })
     }
 
     fn save_settings(&self) {
@@ -980,16 +976,7 @@ impl Store {
     pub fn enqueue(&self, key: &str, task: Task) -> u64 {
         let id = task.id;
         let label = task.label.clone();
-        let snapshot = {
-            let mut g = self.inner.lock();
-            let dev = g
-                .devices
-                .entry(key.to_string())
-                .or_insert_with(|| Device::new(key));
-            dev.queue.push(task);
-            dev.clone()
-        };
-        self.persist_device(&snapshot);
+        self.get_or_create(key, move |dev| dev.queue.push(task));
         self.event(&format!("queued task #{} {}", id, label), Some(key), "info");
         id
     }
@@ -1050,12 +1037,7 @@ impl Store {
 
     // ---------- parameter cache ----------
     pub fn update_parameters(&self, key: &str, pairs: &[crate::cwmp::ParamValue]) {
-        let snapshot = {
-            let mut g = self.inner.lock();
-            let dev = g
-                .devices
-                .entry(key.to_string())
-                .or_insert_with(|| Device::new(key));
+        self.get_or_create(key, |dev| {
             let ts = now_iso();
             for p in pairs {
                 let ent = dev.parameters.entry(p.name.clone()).or_default();
@@ -1063,36 +1045,22 @@ impl Store {
                 ent.type_ = p.type_.clone();
                 ent.ts = ts.clone();
             }
-            dev.clone()
-        };
-        self.persist_device(&snapshot);
+        });
     }
 
     pub fn update_names(&self, key: &str, names: &[crate::cwmp::ParamName]) {
-        let snapshot = {
-            let mut g = self.inner.lock();
-            let dev = g
-                .devices
-                .entry(key.to_string())
-                .or_insert_with(|| Device::new(key));
+        self.get_or_create(key, |dev| {
             let ts = now_iso();
             for n in names {
                 let ent = dev.parameters.entry(n.name.clone()).or_default();
                 ent.writable = Some(n.writable.clone());
                 ent.ts = ts.clone();
             }
-            dev.clone()
-        };
-        self.persist_device(&snapshot);
+        });
     }
 
     pub fn update_attributes(&self, key: &str, attrs: &[crate::cwmp::ParamAttr]) {
-        let snapshot = {
-            let mut g = self.inner.lock();
-            let dev = g
-                .devices
-                .entry(key.to_string())
-                .or_insert_with(|| Device::new(key));
+        self.get_or_create(key, |dev| {
             for a in attrs {
                 dev.attributes.insert(
                     a.name.clone(),
@@ -1102,9 +1070,7 @@ impl Store {
                     },
                 );
             }
-            dev.clone()
-        };
-        self.persist_device(&snapshot);
+        });
     }
 
     pub fn set_rpc_methods(&self, key: &str, methods: Vec<String>) {
