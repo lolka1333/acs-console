@@ -687,14 +687,6 @@ impl Store {
         self.learned_host.read().clone()
     }
 
-    /// Resolve the host (no :port) that file/upload URLs should advertise.
-    /// Precedence: settings.advertise_host (if non-empty) -> CPE-learned host ->
-    /// explicit --advertise-ip (if it was set) -> auto-detected IP.
-    ///
-    /// `advertise_ip` already holds either the explicit --advertise-ip value or
-    /// the auto-detected LAN IP, so it serves as the final fallback for both the
-    /// "explicit" and "auto-detected" tiers; `advertise_ip_explicit` only
-    /// documents which one it is.
     /// The configured advertise_host, else the CPE-learned host — the two tiers
     /// shared by `advertise_host` and `advertise_effective`. None when neither set.
     fn configured_or_learned(&self) -> Option<String> {
@@ -705,6 +697,14 @@ impl Store {
         self.learned_host().filter(|h| !h.is_empty())
     }
 
+    /// Resolve the host (no :port) that file/upload URLs should advertise.
+    /// Precedence: settings.advertise_host (if non-empty) -> CPE-learned host ->
+    /// explicit --advertise-ip (if it was set) -> auto-detected IP.
+    ///
+    /// `advertise_ip` already holds either the explicit --advertise-ip value or
+    /// the auto-detected LAN IP, so it serves as the final fallback for both the
+    /// "explicit" and "auto-detected" tiers; `advertise_ip_explicit` only
+    /// documents which one it is.
     pub fn advertise_host(&self) -> String {
         self.configured_or_learned()
             .unwrap_or_else(|| self.advertise_ip.clone())
