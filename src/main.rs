@@ -1,4 +1,4 @@
-//! main.rs — start the rv6699 TR-069 ACS (port of run_acs.py).
+//! main.rs — start the rv6699 TR-069 ACS.
 //!
 //!   CPE-facing CWMP endpoint :   http://<host>:7547/   (point the router here)
 //!   Web console + REST + files:  http://<host>:7548/
@@ -11,6 +11,7 @@ mod cwmp;
 mod digest;
 mod settings;
 mod store;
+mod util;
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -149,7 +150,8 @@ fn parse_truthy(s: &str) -> Result<bool, String> {
 }
 
 fn detect_ip() -> String {
-    // mirror Python: UDP connect to 192.168.1.1:80 and read local addr.
+    // Pick our LAN-egress IP: UDP-"connect" a socket toward the gateway (no
+    // packet is sent) and read its chosen local address; fall back to loopback.
     match std::net::UdpSocket::bind("0.0.0.0:0") {
         Ok(sock) => match sock.connect("192.168.1.1:80") {
             Ok(_) => sock
@@ -383,11 +385,7 @@ async fn shutdown_signal() {
 
 /// Generate a random 12-hex-char console password for secure first run.
 fn gen_password() -> String {
-    use rand::RngExt;
-    let mut rng = rand::rng();
-    (0..6)
-        .map(|_| format!("{:02x}", rng.random::<u8>()))
-        .collect()
+    util::token_hex(6)
 }
 
 /// Boxed first-run notice printed when the console password was auto-generated.

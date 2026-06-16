@@ -1,4 +1,4 @@
-//! cwmp.rs — CWMP/TR-069 SOAP message construction and parsing (port of cwmp.py).
+//! cwmp.rs — CWMP/TR-069 SOAP message construction and parsing.
 //!
 //! Build side: hand-rolled string templates byte-faithful to the real RV6699
 //! cwmp client (verified against the firmware binary): uppercase SOAP-ENV/
@@ -68,10 +68,6 @@ xmlns:cwmp=\"{ns}\">\
 </SOAP-ENV:Header>\
 <SOAP-ENV:Body>{body}</SOAP-ENV:Body>\
 </SOAP-ENV:Envelope>",
-        SOAP_ENV = SOAP_ENV,
-        SOAP_ENC = SOAP_ENC,
-        XSD = XSD,
-        XSI = XSI,
         ns = cwmp_ns,
         id = xml_escape(cwmp_id),
         body = body_inner,
@@ -80,11 +76,22 @@ xmlns:cwmp=\"{ns}\">\
 }
 
 // --- ACS -> CPE request builders -------------------------------------------
+
+/// Join values into SOAP-ENC `<string>…</string>` items (each xml-escaped). The
+/// caller wraps them in the appropriate `arrayType` element.
+fn soap_string_items<I, S>(items: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    items
+        .into_iter()
+        .map(|s| format!("<string>{}</string>", xml_escape(s.as_ref())))
+        .collect()
+}
+
 pub fn get_parameter_values(names: &[String]) -> String {
-    let items: String = names
-        .iter()
-        .map(|n| format!("<string>{}</string>", xml_escape(n)))
-        .collect();
+    let items = soap_string_items(names);
     format!(
         "<cwmp:GetParameterValues><ParameterNames \
 SOAP-ENC:arrayType=\"xsd:string[{n}]\">{items}\
@@ -136,10 +143,7 @@ pub fn get_parameter_names(path: &str, next_level: bool) -> String {
 }
 
 pub fn get_parameter_attributes(names: &[String]) -> String {
-    let items: String = names
-        .iter()
-        .map(|n| format!("<string>{}</string>", xml_escape(n)))
-        .collect();
+    let items = soap_string_items(names);
     format!(
         "<cwmp:GetParameterAttributes><ParameterNames \
 SOAP-ENC:arrayType=\"xsd:string[{n}]\">{items}\
@@ -168,10 +172,7 @@ pub fn set_parameter_attributes(items: &[AttrItem]) -> String {
             };
             let empty: Vec<String> = Vec::new();
             let al = it.access_list.as_ref().unwrap_or(&empty);
-            let al_xml: String = al
-                .iter()
-                .map(|a| format!("<string>{}</string>", xml_escape(a)))
-                .collect();
+            let al_xml = soap_string_items(al);
             format!(
                 "<SetParameterAttributesStruct>\
 <Name>{name}</Name>\
@@ -315,10 +316,7 @@ pub fn autonomous_transfer_complete_response() -> String {
 }
 
 pub fn get_rpc_methods_response(methods: &[&str]) -> String {
-    let items: String = methods
-        .iter()
-        .map(|m| format!("<string>{}</string>", xml_escape(m)))
-        .collect();
+    let items = soap_string_items(methods);
     format!(
         "<cwmp:GetRPCMethodsResponse><MethodList \
 SOAP-ENC:arrayType=\"xsd:string[{n}]\">{items}\
@@ -417,6 +415,12 @@ fn txt(el: Node, name: &str) -> String {
     }
 }
 
+/// Like `txt`, but `None` when the element is absent (vs `Some("")` when present
+/// but empty) — used for the optional Status/time fields so absent maps to null.
+fn txt_opt(el: Node, name: &str) -> Option<String> {
+    find_descendant(el, name).map(|n| n.text().unwrap_or("").trim().to_string())
+}
+
 pub fn detect_cwmp_ns(raw: &[u8]) -> String {
     let s = String::from_utf8_lossy(raw);
     // look for xmlns:xxx="urn:dslforum-org:cwmp-1-N"
@@ -508,23 +512,19 @@ pub fn parse(raw: &[u8]) -> ParsedMessage {
             out.attributes = parse_attr_list(rpc);
         }
         "SetParameterValuesResponse" => {
-            out.status =
-                find_descendant(rpc, "Status").map(|s| s.text().unwrap_or("").trim().to_string());
+            out.status = txt_opt(rpc, "Status");
         }
         "AddObjectResponse" => {
-            out.instance_number = find_descendant(rpc, "InstanceNumber")
-                .map(|s| s.text().unwrap_or("").trim().to_string());
-            out.status =
-                find_descendant(rpc, "Status").map(|s| s.text().unwrap_or("").trim().to_string());
+            out.instance_number = txt_opt(rpc, "InstanceNumber");
+            out.status = txt_opt(rpc, "Status");
         }
         "DeleteObjectResponse" => {
-            out.status =
-                find_descendant(rpc, "Status").map(|s| s.text().unwrap_or("").trim().to_string());
+            out.status = txt_opt(rpc, "Status");
         }
         "DownloadResponse" | "UploadResponse" => {
-            out.status = Some(txt(rpc, "Status"));
-            out.start_time = Some(txt(rpc, "StartTime"));
-            out.complete_time = Some(txt(rpc, "CompleteTime"));
+            out.status = txt_opt(rpc, "Status");
+            out.start_time = txt_opt(rpc, "StartTime");
+            out.complete_time = txt_opt(rpc, "CompleteTime");
         }
         "GetRPCMethodsResponse" => {
             out.methods = rpc
@@ -659,6 +659,6 @@ fn parse_transfer_complete(rpc: Node, out: &mut ParsedMessage) {
         out.fault_string = txt(fs, "FaultString");
     }
     out.command_key = txt(rpc, "CommandKey");
-    out.start_time = Some(txt(rpc, "StartTime"));
-    out.complete_time = Some(txt(rpc, "CompleteTime"));
+    out.start_time = txt_opt(rpc, "StartTime");
+    out.complete_time = txt_opt(rpc, "CompleteTime");
 }

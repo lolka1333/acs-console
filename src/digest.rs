@@ -1,26 +1,13 @@
-//! digest.rs — HTTP Digest auth, both directions (port of digest.py).
+//! digest.rs — HTTP Digest auth, both directions.
 //!
 //! Server side: the ACS challenges the CPE on the CWMP session.
 //! RFC 2617 Digest, qop="auth", algorithm=MD5. Basic also accepted.
 
 use base64::Engine;
-use md5::{Digest, Md5};
-use rand::RngExt;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn md5_hex(s: &str) -> String {
-    let mut h = Md5::new();
-    h.update(s.as_bytes());
-    hex::encode(h.finalize())
-}
-
-fn token_hex(nbytes: usize) -> String {
-    let mut rng = rand::rng();
-    (0..nbytes)
-        .map(|_| format!("{:02x}", rng.random::<u8>()))
-        .collect()
-}
+use crate::util::{md5_hex, token_hex};
 
 fn now_unix() -> u64 {
     SystemTime::now()
@@ -50,7 +37,8 @@ pub fn nonce_age(nonce: &str) -> f64 {
     }
 }
 
-/// Parsed Authorization header. `_scheme` holds "basic"/"digest"/other.
+/// Parsed Authorization header. The `"_scheme"` map key holds
+/// "basic"/"digest"/other; credentials and digest fields are sibling keys.
 #[derive(Debug, Clone, Default)]
 pub struct AuthHeader {
     pub map: HashMap<String, String>,
@@ -153,6 +141,21 @@ fn ct_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// Recompute and constant-time-compare a nonce's signature: detects a forged or
+/// tampered nonce (minted without `secret`) before we even check its age.
+fn verify_nonce(nonce: &str, secret: &str) -> bool {
+    let decoded = match base64::engine::general_purpose::STANDARD.decode(nonce) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let decoded = String::from_utf8_lossy(&decoded);
+    let mut parts = decoded.splitn(3, ':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(ts), Some(rnd), Some(sig)) => ct_eq(&md5_hex(&format!("{ts}:{rnd}:{secret}")), sig),
+        _ => false,
+    }
+}
+
 /// Validate a CPE Authorization header against the configured creds.
 pub fn verify(
     method: &str,
@@ -160,6 +163,7 @@ pub fn verify(
     username: &str,
     password: &str,
     realm: &str,
+    nonce_secret: &str,
     max_age: f64,
 ) -> bool {
     let a = parse_auth_header(auth_header);
@@ -167,7 +171,7 @@ pub fn verify(
         return false;
     }
     if a.scheme() == "basic" {
-        return a.get("username") == username && a.get("_basic_password") == password;
+        return a.get("username") == username && ct_eq(a.get("_basic_password"), password);
     }
     if a.scheme() != "digest" {
         return false;
@@ -176,16 +180,14 @@ pub fn verify(
         return false;
     }
     let nonce = a.get("nonce");
-    if nonce_age(nonce) > max_age {
+    // Reject nonces we did not mint, then stale ones.
+    if !verify_nonce(nonce, nonce_secret) || nonce_age(nonce) > max_age {
         return false;
     }
     let uri = a.get("uri");
-    let a_realm = if a.get("realm").is_empty() {
-        realm
-    } else {
-        a.get("realm")
-    };
-    let ha1 = md5_hex(&format!("{username}:{a_realm}:{password}"));
+    // HA1 must bind to the realm WE issued in the challenge, not a client-echoed
+    // one. A conformant CPE echoes the same value, so this never breaks real auth.
+    let ha1 = md5_hex(&format!("{username}:{realm}:{password}"));
     let ha2 = md5_hex(&format!("{method}:{uri}"));
     let qop = a.get("qop");
     let expect = if qop == "auth" {

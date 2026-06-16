@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     /// ACS-session auth: the username the CPE must present. Empty password =>
     /// open mode (no CPE auth).
-    #[serde(default)]
+    #[serde(default = "default_acs_username")]
     pub acs_username: String,
     #[serde(default)]
     pub acs_password: String,
@@ -52,6 +52,10 @@ pub struct Settings {
     pub debug_wire: bool,
 }
 
+fn default_acs_username() -> String {
+    "ag".to_string()
+}
+
 fn default_console_username() -> String {
     "admin".to_string()
 }
@@ -63,7 +67,7 @@ fn default_challenge() -> String {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            acs_username: "ag".to_string(),
+            acs_username: default_acs_username(),
             acs_password: String::new(),
             console_username: default_console_username(),
             console_password: String::new(),

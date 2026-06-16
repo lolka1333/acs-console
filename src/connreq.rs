@@ -1,29 +1,15 @@
-//! connreq.rs — TR-069 Connection Request client (port of connreq.py).
+//! connreq.rs — TR-069 Connection Request client.
 //!
 //! The ACS makes an HTTP GET to the CPE's ConnectionRequestURL. The CPE answers
 //! with a Digest 401 challenge; we retry with the Connection Request creds.
 //! Implemented over a raw tokio TcpStream (no reqwest).
 
 use crate::digest;
-use md5::{Digest, Md5};
-use rand::RngExt;
+use crate::util::{md5_hex, token_hex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-
-fn md5_hex(s: &str) -> String {
-    let mut h = Md5::new();
-    h.update(s.as_bytes());
-    hex::encode(h.finalize())
-}
-
-fn token_hex(nbytes: usize) -> String {
-    let mut rng = rand::rng();
-    (0..nbytes)
-        .map(|_| format!("{:02x}", rng.random::<u8>()))
-        .collect()
-}
 
 struct ParsedUrl {
     host: String,
@@ -49,12 +35,13 @@ fn parse_url(url: &str) -> Option<ParsedUrl> {
 }
 
 /// Send a raw HTTP GET, optionally with an Authorization header.
-/// Returns (status_code, headers_block, body).
+/// Returns (status_code, headers_block). The body is not needed by any caller
+/// (we only inspect the status line and WWW-Authenticate), so it is discarded.
 async fn http_get(
     u: &ParsedUrl,
     auth: Option<&str>,
     timeout_secs: f64,
-) -> Result<(u16, String, Vec<u8>), String> {
+) -> Result<(u16, String), String> {
     let addr = format!("{}:{}", u.host, u.port);
     let dur = Duration::from_secs_f64(timeout_secs);
 
@@ -100,19 +87,17 @@ async fn http_get(
         }
     }
 
-    let split = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
-    let (head, body) = match split {
-        Some(i) => (buf[..i].to_vec(), buf[i..].to_vec()),
-        None => (buf.clone(), Vec::new()),
+    let head_str = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(i) => String::from_utf8_lossy(&buf[..i + 4]).into_owned(),
+        None => String::from_utf8_lossy(&buf).into_owned(),
     };
-    let head_str = String::from_utf8_lossy(&head).to_string();
     let status = head_str
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| "error: malformed response".to_string())?;
-    Ok((status, head_str, body))
+    Ok((status, head_str))
 }
 
 fn header_value(head: &str, name: &str) -> Option<String> {
@@ -166,8 +151,10 @@ fn build_digest_auth(
         response = md5_hex(&format!("{ha1}:{nonce}:{ha2}"));
         header.push_str(&format!(", response=\"{response}\""));
     }
+    // We only compute plain-MD5 HA1, so advertise MD5 — never echo back an
+    // algorithm we don't implement (e.g. MD5-sess), which the CPE would reject.
     if !algorithm.is_empty() {
-        header.push_str(&format!(", algorithm={algorithm}"));
+        header.push_str(", algorithm=MD5");
     }
     if !opaque.is_empty() {
         header.push_str(&format!(", opaque=\"{opaque}\""));
@@ -196,7 +183,7 @@ pub async fn trigger(url: &str, username: &str, password: &str) -> (bool, String
     let timeout_secs = 10.0;
 
     // first request (no auth)
-    let (status, head, _body) = match http_get(&u, None, timeout_secs).await {
+    let (status, head) = match http_get(&u, None, timeout_secs).await {
         Ok(r) => r,
         Err(e) => return (false, e),
     };
@@ -214,7 +201,7 @@ pub async fn trigger(url: &str, username: &str, password: &str) -> (bool, String
         } else {
             build_basic_auth(username, password)
         };
-        let (status2, _head2, _body2) = match http_get(&u, Some(&auth), timeout_secs).await {
+        let (status2, _head2) = match http_get(&u, Some(&auth), timeout_secs).await {
             Ok(r) => r,
             Err(e) => return (false, e),
         };

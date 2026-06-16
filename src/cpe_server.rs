@@ -17,7 +17,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use parking_lot::Mutex;
-use rand::RngExt;
 use serde_json::{Value, json};
 
 use crate::config::Config;
@@ -25,6 +24,7 @@ use crate::cwmp;
 use crate::digest;
 use crate::settings::Settings;
 use crate::store::{Store, Task};
+use crate::util::token_hex;
 
 /// Live per-session state, correlated by ACSSESSION cookie or client IP.
 #[derive(Default)]
@@ -52,13 +52,6 @@ impl CpeState {
             sessions: Mutex::new(HashMap::new()),
         })
     }
-}
-
-fn token_hex(nbytes: usize) -> String {
-    let mut rng = rand::rng();
-    (0..nbytes)
-        .map(|_| format!("{:02x}", rng.random::<u8>()))
-        .collect()
 }
 
 fn new_acs_id(seq: &mut u64) -> String {
@@ -265,7 +258,9 @@ pub async fn cwmp_post(
         }
         sess_auth = true;
     }
-    if !msg.cwmp_ns.is_empty() {
+    // Don't let an empty/parse-error continuation (which always reports the
+    // default namespace) clobber the one the Inform negotiated for the session.
+    if kind != "empty" && kind != "parse_error" {
         sess_ns = msg.cwmp_ns.clone();
     }
 
@@ -282,7 +277,6 @@ pub async fn cwmp_post(
         ),
         "empty" => send_next_or_end(
             &store,
-            &cfg,
             sess_key.as_deref(),
             &sess_ns,
             &mut sess_seq,
@@ -324,7 +318,6 @@ pub async fn cwmp_post(
         }
         k if k.ends_with("Response") || k == "Fault" => handle_rpc_response(
             &store,
-            &cfg,
             &msg,
             sess_key.as_deref(),
             &sess_ns,
@@ -563,6 +556,7 @@ fn check_auth(
         &settings.acs_username,
         &settings.acs_password,
         &cfg.realm,
+        &cfg.nonce_secret,
         300.0,
     );
     if !ok {
@@ -767,7 +761,7 @@ fn handle_transfer_complete(
     } else {
         msg.fault_code.clone()
     };
-    let ok = fc.is_empty() || fc == "0";
+    let ok = fc == "0";
     let label = if autonomous {
         "AutonomousTransferComplete"
     } else {
@@ -799,10 +793,8 @@ fn handle_transfer_complete(
 }
 
 // ---------------- RPC responses ----------------
-#[allow(clippy::too_many_arguments)]
 fn handle_rpc_response(
     store: &Store,
-    cfg: &Config,
     msg: &cwmp::ParsedMessage,
     session_key: Option<&str>,
     session_ns: &str,
@@ -840,7 +832,7 @@ fn handle_rpc_response(
             });
             store.finish_task(key, t, "fault", Value::Null, fault);
         }
-        return send_next_or_end(store, cfg, session_key, session_ns, seq, inflight);
+        return send_next_or_end(store, session_key, session_ns, seq, inflight);
     }
 
     if let Some(t) = task {
@@ -861,7 +853,7 @@ fn handle_rpc_response(
             expand_walk(store, key, wid, walk_depth, &path, msg);
         }
     }
-    send_next_or_end(store, cfg, session_key, session_ns, seq, inflight)
+    send_next_or_end(store, session_key, session_ns, seq, inflight)
 }
 
 fn absorb(store: &Store, key: &str, msg: &cwmp::ParsedMessage) -> Value {
@@ -956,7 +948,6 @@ fn expand_walk(
 // ---------------- queue driver ----------------
 fn send_next_or_end(
     store: &Store,
-    _cfg: &Config,
     session_key: Option<&str>,
     session_ns: &str,
     seq: &mut u64,

@@ -1,6 +1,6 @@
-//! config.rs — runtime configuration for the ACS (port of config.py).
+//! config.rs — runtime configuration for the ACS.
 
-use rand::RngExt;
+use crate::util::token_hex;
 
 /// Static, startup-only configuration. Runtime-mutable settings (ACS/console
 /// creds, capture, challenge, CR creds, advertise host) now live in
@@ -30,12 +30,6 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let nonce_secret: String = {
-            let mut rng = rand::rng();
-            (0..16)
-                .map(|_| format!("{:02x}", rng.random::<u8>()))
-                .collect()
-        };
         Config {
             host_ip: "0.0.0.0".to_string(),
             advertise_ip: "192.168.1.68".to_string(),
@@ -48,8 +42,10 @@ impl Default for Config {
             data_dir: "data".to_string(),
             files_dir: "files".to_string(),
             uploads_dir: "uploads".to_string(),
-            web_dir: "frontend/dist".to_string(),
-            nonce_secret,
+            // Empty = serve the binary-embedded console (the real default; main.rs
+            // overrides from --web-dir/WEB_DIR when an on-disk copy is requested).
+            web_dir: String::new(),
+            nonce_secret: token_hex(16),
         }
     }
 }

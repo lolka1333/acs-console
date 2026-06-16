@@ -1,5 +1,5 @@
-//! store.rs — thread-safe device registry, parameter cache, and task queue
-//! (port of store.py). Devices, discovered parameters, the task queue/history,
+//! store.rs — thread-safe device registry, parameter cache, and task queue.
+//! Devices, discovered parameters, the task queue/history,
 //! events, captured credentials, the diagnostic wire log, and settings all
 //! persist incrementally to an embedded SQLite database (`acs.db`) in the data
 //! dir. The in-memory model is kept as the single source of truth for reads; we
@@ -26,6 +26,8 @@ const WIRE_DB_CAP: i64 = 5000;
 
 /// Max number of event rows retained in SQLite before old rows are pruned.
 const EVENT_DB_CAP: i64 = 1000;
+/// Max distinct deduped credentials kept per in-memory capture list.
+const CAPTURE_CAP: usize = 200;
 
 pub fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -83,6 +85,41 @@ fn bump_capture(rec: &mut Value, now: &str) {
         obj.insert("count".to_string(), json!(next));
         obj.insert("last".to_string(), json!(now));
     }
+}
+
+/// Dedup a capture into `list`: bump an existing match's count/`last`, else push
+/// a fresh record (count=1, first=last=now) and cap the list at `CAPTURE_CAP`.
+/// Returns the snapshot to persist. Runs under the caller's inner lock.
+fn capture_dedup_push(
+    list: &mut Vec<Value>,
+    scheme: &str,
+    username: &str,
+    identity: &str,
+    key: &str,
+    now: &str,
+    rec: Value,
+) -> Value {
+    if let Some(existing) = list
+        .iter_mut()
+        .find(|c| capture_matches(c, scheme, username, identity))
+    {
+        bump_capture(existing, now);
+        return existing.clone();
+    }
+    let mut fresh = rec;
+    if let Some(obj) = fresh.as_object_mut() {
+        obj.remove("ts");
+        obj.insert("key".to_string(), json!(key));
+        obj.insert("first".to_string(), json!(now));
+        obj.insert("last".to_string(), json!(now));
+        obj.insert("count".to_string(), json!(1u64));
+    }
+    list.push(fresh.clone());
+    if list.len() > CAPTURE_CAP {
+        let start = list.len() - CAPTURE_CAP;
+        list.drain(0..start);
+    }
+    fresh
 }
 
 /// One queued ACS->CPE RPC (or a discovery walk node).
@@ -739,57 +776,26 @@ impl Store {
         let mut device_persist: Option<Value> = None;
         {
             let mut g = self.inner.lock();
-            // Global list: dedup or insert.
-            if let Some(existing) = g
-                .captures
-                .iter_mut()
-                .find(|c| capture_matches(c, &scheme, &username, &identity))
-            {
-                bump_capture(existing, &now);
-                global_persist = existing.clone();
-            } else {
-                let mut fresh = rec.clone();
-                {
-                    let obj = fresh.as_object_mut().unwrap();
-                    obj.remove("ts");
-                    obj.insert("key".to_string(), json!(key));
-                    obj.insert("first".to_string(), json!(now));
-                    obj.insert("last".to_string(), json!(now));
-                    obj.insert("count".to_string(), json!(1u64));
-                }
-                g.captures.push(fresh.clone());
-                if g.captures.len() > 200 {
-                    let start = g.captures.len() - 200;
-                    g.captures.drain(0..start);
-                }
-                global_persist = fresh;
-            }
-            // Per-device list: same dedup against this device's captures.
+            // Global list ('' device_key), then this device's list — same dedup.
+            global_persist = capture_dedup_push(
+                &mut g.captures,
+                &scheme,
+                &username,
+                &identity,
+                key,
+                &now,
+                rec.clone(),
+            );
             if let Some(dev) = g.devices.get_mut(key) {
-                if let Some(existing) = dev
-                    .captures
-                    .iter_mut()
-                    .find(|c| capture_matches(c, &scheme, &username, &identity))
-                {
-                    bump_capture(existing, &now);
-                    device_persist = Some(existing.clone());
-                } else {
-                    let mut fresh = rec;
-                    {
-                        let obj = fresh.as_object_mut().unwrap();
-                        obj.remove("ts");
-                        obj.insert("key".to_string(), json!(key));
-                        obj.insert("first".to_string(), json!(now));
-                        obj.insert("last".to_string(), json!(now));
-                        obj.insert("count".to_string(), json!(1u64));
-                    }
-                    dev.captures.push(fresh.clone());
-                    if dev.captures.len() > 200 {
-                        let start = dev.captures.len() - 200;
-                        dev.captures.drain(0..start);
-                    }
-                    device_persist = Some(fresh);
-                }
+                device_persist = Some(capture_dedup_push(
+                    &mut dev.captures,
+                    &scheme,
+                    &username,
+                    &identity,
+                    key,
+                    &now,
+                    rec,
+                ));
             }
         }
         // Write through to SQLite: global record keyed by '' + per-device record.
@@ -1376,7 +1382,7 @@ impl Store {
 
         // --- events (most recent EVENT_DB_CAP, oldest-first into the log) ---
         if let Ok(mut stmt) =
-            conn.prepare("SELECT ts,device_key,level,message FROM events ORDER BY id ASC LIMIT ?1")
+            conn.prepare("SELECT ts,device_key,level,message FROM events ORDER BY id DESC LIMIT ?1")
         {
             let rows = stmt.query_map(rusqlite::params![EVENT_DB_CAP], |row| {
                 let dk: Option<String> = row.get(1)?;
@@ -1388,9 +1394,9 @@ impl Store {
                 })
             });
             if let Ok(rows) = rows {
-                for e in rows.flatten() {
-                    g.log.push(e);
-                }
+                let mut entries: Vec<LogEntry> = rows.flatten().collect();
+                entries.reverse(); // selected DESC (newest); restore oldest-first
+                g.log.extend(entries);
             }
         }
 

@@ -1,5 +1,5 @@
-//! console.rs — control-plane HTTP server: REST API + file server + static UI
-//! (port of console.py). Serves the built React frontend from cfg.web_dir.
+//! console.rs — control-plane HTTP server: REST API + file server + static UI.
+//! Serves the built React frontend from cfg.web_dir.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -94,12 +94,23 @@ fn check_basic(hdr: &str, user: &str, pass: &str) -> bool {
 }
 
 fn json_response(value: Value, code: StatusCode) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        header::HeaderValue::from_static("*"),
-    );
-    (code, headers, Json(value)).into_response()
+    // CORS is applied uniformly by the global CorsLayer (main.rs); setting
+    // Access-Control-Allow-Origin here too would emit a duplicated, invalid header.
+    (code, Json(value)).into_response()
+}
+
+/// If `args` has a "file" but no explicit "url", insert url=make_url(file) and
+/// return the file name. Shared by the download/upload task convenience rewrite.
+fn rewrite_file_url(args: &mut Value, make_url: impl FnOnce(&str) -> String) -> Option<String> {
+    let file = args.get("file").and_then(|v| v.as_str())?.to_string();
+    if args.get("url").is_some() {
+        return None;
+    }
+    let url = make_url(&file);
+    if let Some(obj) = args.as_object_mut() {
+        obj.insert("url".to_string(), json!(url));
+    }
+    Some(file)
 }
 
 // ---- GET /api/state ----
@@ -297,38 +308,22 @@ pub async fn api_task(
         .map(|s| s.to_string())
         .unwrap_or_else(|| ttype.clone());
 
-    // convenience: rewrite download/upload URLs to our file server, using the
-    // effective advertise host (configured -> CPE-learned -> explicit -> auto).
-    let host = store.advertise_host();
+    // convenience: rewrite a download/upload "file" to a URL on our file server,
+    // using the effective advertise host (configured -> CPE-learned -> explicit ->
+    // auto). Only these two task types consume the host, so derive it lazily.
     if ttype == "download" {
-        let has_file = args.get("file").and_then(|v| v.as_str()).is_some();
-        let has_url = args.get("url").is_some();
-        if has_file && !has_url {
-            let file = args
-                .get("file")
-                .and_then(|v| v.as_str())
-                .unwrap()
-                .to_string();
-            let obj = args.as_object_mut().unwrap();
-            obj.insert("url".to_string(), json!(cfg.file_url(&host, &file)));
+        let host = store.advertise_host();
+        if let Some(file) = rewrite_file_url(&mut args, |f| cfg.file_url(&host, f)) {
             let fp = Path::new(&cfg.files_dir).join(&file);
-            if let Ok(meta) = std::fs::metadata(&fp) {
+            if let Ok(meta) = std::fs::metadata(&fp)
+                && let Some(obj) = args.as_object_mut()
+            {
                 obj.entry("file_size").or_insert_with(|| json!(meta.len()));
             }
         }
-    }
-    if ttype == "upload" {
-        let has_file = args.get("file").and_then(|v| v.as_str()).is_some();
-        let has_url = args.get("url").is_some();
-        if has_file && !has_url {
-            let file = args
-                .get("file")
-                .and_then(|v| v.as_str())
-                .unwrap()
-                .to_string();
-            let obj = args.as_object_mut().unwrap();
-            obj.insert("url".to_string(), json!(cfg.upload_url(&host, &file)));
-        }
+    } else if ttype == "upload" {
+        let host = store.advertise_host();
+        rewrite_file_url(&mut args, |f| cfg.upload_url(&host, f));
     }
 
     let task = Task::new(&ttype, args, Some(&label), None, 0);
