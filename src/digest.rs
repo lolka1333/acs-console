@@ -199,3 +199,89 @@ pub fn verify(
     };
     ct_eq(&expect, a.get("response"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b64(s: &str) -> String {
+        base64::engine::general_purpose::STANDARD.encode(s)
+    }
+
+    // Build the Authorization header a CPE would send for qop=auth, given the
+    // realm it used for HA1 (the server should bind HA1 to ITS realm, not this).
+    fn client_digest(
+        method: &str,
+        uri: &str,
+        user: &str,
+        pass: &str,
+        realm: &str,
+        nonce: &str,
+    ) -> String {
+        let ha1 = md5_hex(&format!("{user}:{realm}:{pass}"));
+        let ha2 = md5_hex(&format!("{method}:{uri}"));
+        let (nc, cnonce) = ("00000001", "0a4f113b");
+        let resp = md5_hex(&format!("{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}"));
+        format!(
+            "Digest username=\"{user}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", \
+             qop=auth, nc={nc}, cnonce=\"{cnonce}\", response=\"{resp}\""
+        )
+    }
+
+    #[test]
+    fn digest_round_trip_and_tampering() {
+        let (realm, secret, user, pass, uri) =
+            ("rv6699-acs", "f00dcafe", "ag", "TheRealMgtsPass!", "/cwmp");
+
+        // The ACS issues the challenge; pull the server-minted nonce back out.
+        let nonce = parse_auth_header(&challenge_header(realm, secret))
+            .get("nonce")
+            .to_string();
+
+        // 1) honest CPE response with the correct creds + server realm -> accept.
+        let ok = client_digest("POST", uri, user, pass, realm, &nonce);
+        assert!(verify("POST", &ok, user, pass, realm, secret, 300.0));
+
+        // 2) wrong password -> reject.
+        assert!(!verify("POST", &ok, user, "nope", realm, secret, 300.0));
+
+        // 3) HA1 computed with a DIFFERENT realm -> reject (server binds its own).
+        let wrong_realm = client_digest("POST", uri, user, pass, "evil-realm", &nonce);
+        assert!(!verify(
+            "POST",
+            &wrong_realm,
+            user,
+            pass,
+            realm,
+            secret,
+            300.0
+        ));
+
+        // 4) forged nonce: fresh timestamp (age ok) but a signature not minted
+        //    with `secret` -> verify_nonce rejects even though the response is
+        //    internally consistent for that nonce.
+        let forged = b64(&format!("{}:aa:badsig", now_unix()));
+        let forged_auth = client_digest("POST", uri, user, pass, realm, &forged);
+        assert!(!verify(
+            "POST",
+            &forged_auth,
+            user,
+            pass,
+            realm,
+            secret,
+            300.0
+        ));
+
+        // 5) stale (but correctly-signed) nonce -> reject on age.
+        assert!(!verify("POST", &ok, user, pass, realm, secret, -1.0));
+    }
+
+    #[test]
+    fn basic_auth_constant_time_compare() {
+        let (realm, secret, user, pass) = ("rv6699-acs", "f00dcafe", "ag", "TheRealMgtsPass!");
+        let good = format!("Basic {}", b64(&format!("{user}:{pass}")));
+        assert!(verify("POST", &good, user, pass, realm, secret, 300.0));
+        let bad = format!("Basic {}", b64(&format!("{user}:wrong")));
+        assert!(!verify("POST", &bad, user, pass, realm, secret, 300.0));
+    }
+}
