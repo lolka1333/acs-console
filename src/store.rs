@@ -310,6 +310,24 @@ impl Device {
         }
     }
 
+    /// Map well-known DeviceInfo / ManagementServer parameter leaves into the
+    /// typed device fields, so the device list, DB row, and API expose them — not
+    /// just the raw `parameters` map. Called whenever params are absorbed (the
+    /// Inform's forced list and GetParameterValues responses). Empty values are
+    /// ignored so a blank read never clobbers a known value.
+    pub fn absorb_wellknown(&mut self, name: &str, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+        if name.ends_with("DeviceInfo.SoftwareVersion") {
+            self.software_version = value.to_string();
+        } else if name.ends_with("DeviceInfo.ModelName") {
+            self.model = value.to_string();
+        } else if name.ends_with("ManagementServer.ConnectionRequestURL") {
+            self.connection_request_url = value.to_string();
+        }
+    }
+
     fn params_value(&self) -> Value {
         let mut m = Map::new();
         for (k, v) in &self.parameters {
@@ -1044,6 +1062,7 @@ impl Store {
                 ent.value = p.value.clone();
                 ent.type_ = p.type_.clone();
                 ent.ts = ts.clone();
+                dev.absorb_wellknown(&p.name, &p.value);
             }
         });
     }

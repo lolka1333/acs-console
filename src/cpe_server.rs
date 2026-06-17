@@ -714,9 +714,7 @@ fn handle_inform(
             ent.value = p.value.clone();
             ent.type_ = p.type_.clone();
             ent.ts = ts.clone();
-            if p.name.ends_with("ManagementServer.ConnectionRequestURL") {
-                dev.connection_request_url = p.value.clone();
-            }
+            dev.absorb_wellknown(&p.name, &p.value);
             if p.name.starts_with("Device.") {
                 dev.root = "Device.".to_string();
             } else if p.name.starts_with("InternetGatewayDevice.") {
