@@ -281,13 +281,15 @@ export default function Accounts({ device: d, onChanged }: Props) {
 
         {showCreate && (
           <div className="acct-form">
-            <div className="acct-form-grid">
+            <div className="acct-field">
               <label>Username</label>
               <input
                 value={newUser}
                 placeholder="myadmin"
                 onInput={(e) => setNewUser((e.target as HTMLInputElement).value)}
               />
+            </div>
+            <div className="acct-field">
               <label>Password</label>
               <span className="acct-pwrow">
                 <input
@@ -308,6 +310,8 @@ export default function Accounts({ device: d, onChanged }: Props) {
                   {showPass ? "🙈" : "👁"}
                 </button>
               </span>
+            </div>
+            <div className="acct-field">
               <label>Group</label>
               <span className="seg">
                 {GROUPS.map((g) => (
@@ -322,6 +326,8 @@ export default function Accounts({ device: d, onChanged }: Props) {
                   </button>
                 ))}
               </span>
+            </div>
+            <div className="acct-field">
               <label>Access</label>
               <span className="grp">
                 {PERMS.map((tok) => (

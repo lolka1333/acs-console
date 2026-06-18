@@ -510,43 +510,46 @@ button.sm {
   z-index: 15;
 }
 
-/* Expandable create-account form. */
+/* Expandable create-account form: vertical fields, fixed width, consistent inputs. */
 .acct-form {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel2);
-  padding: 14px;
+  padding: 14px 16px;
   margin-bottom: 12px;
+  max-width: 440px;
 }
-.acct-form-grid {
-  display: grid;
-  grid-template-columns: 74px 1fr;
-  gap: 10px 12px;
-  align-items: center;
+.acct-field {
+  margin-bottom: 13px;
 }
-.acct-form-grid label {
+.acct-field > label {
+  display: block;
   color: var(--mut);
-  font-size: 12px;
+  font-size: 11px;
+  margin-bottom: 6px;
+  letter-spacing: 0.03em;
 }
-.acct-form-grid > input {
-  width: 200px;
-  max-width: 100%;
+.acct-field > input {
+  width: 100%;
+}
+.acct-field .seg button {
+  padding: 5px 14px;
+  font-size: 12px;
 }
 .acct-pwrow {
   display: flex;
   gap: 6px;
   align-items: center;
-  flex-wrap: wrap;
 }
 .acct-pwrow input {
   flex: 1;
-  min-width: 150px;
+  min-width: 0;
 }
 .acct-form-foot {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
-  margin-top: 14px;
+  margin-top: 2px;
   border-top: 1px solid var(--line);
   padding-top: 12px;
 }
