@@ -524,7 +524,7 @@ button.sm {
 }
 .acct-mgrid {
   display: grid;
-  grid-template-columns: 78px 1fr;
+  grid-template-columns: 78px minmax(0, 1fr);
   gap: 12px;
   align-items: center;
   justify-items: start;
