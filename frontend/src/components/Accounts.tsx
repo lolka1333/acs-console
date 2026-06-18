@@ -404,7 +404,7 @@ export default function Accounts({ device: d, onChanged }: Props) {
       </div>
 
       {showCreate && (
-        <div className="modal-backdrop" onClick={() => setShowCreate(false)}>
+        <div className="modal-backdrop center" onClick={() => setShowCreate(false)}>
           <div
             className="modal acct-modal"
             role="dialog"
@@ -438,12 +438,12 @@ export default function Accounts({ device: d, onChanged }: Props) {
                     placeholder="password"
                     onInput={(e) => setNewPass((e.target as HTMLInputElement).value)}
                   />
-                  <button type="button" className="sm" onClick={() => setNewPass(genPassword())}>
+                  <button type="button" className="acct-pwbtn" onClick={() => setNewPass(genPassword())}>
                     🎲 generate
                   </button>
                   <button
                     type="button"
-                    className="sm"
+                    className="acct-pwbtn"
                     aria-label={showPass ? "hide password" : "show password"}
                     onClick={() => setShowPass((v) => !v)}
                   >

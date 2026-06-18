@@ -511,8 +511,16 @@ button.sm {
 }
 
 /* Create-account modal (reuses .modal* from the Settings / Wire dialogs). */
+.modal-backdrop.center {
+  align-items: center;
+}
 .modal.acct-modal {
   max-width: 420px;
+}
+.acct-pwbtn {
+  padding: 6px 11px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 .acct-mgrid {
   display: grid;
