@@ -82,6 +82,12 @@ export default function Accounts({ device: d, onChanged }: Props) {
   const effective = (name: string, server?: string) =>
     name in pending ? pending[name] : server;
 
+  // New-account form fields.
+  const [newUser, setNewUser] = useState("");
+  const [newPass, setNewPass] = useState("");
+  const [newGroup, setNewGroup] = useState("admin");
+  const [newPerm, setNewPerm] = useState("web,cli");
+
   async function task(type: string, args: Record<string, unknown>, label: string) {
     await postTask(d.key, type, args, label);
     setTimeout(onChanged, 300);
@@ -156,6 +162,41 @@ export default function Accounts({ device: d, onChanged }: Props) {
   function reboot() {
     if (window.confirm("Reboot the router now to apply group / permission changes?"))
       void task("reboot", { command_key: "acs-reboot" }, "REBOOT");
+  }
+
+  // Quick create: one AddObject carrying a `then_set` list. The ACS reads the new
+  // instance number from the AddObjectResponse and fills the fields in the same
+  // session (see handle_rpc_response). Then push it and remind to reboot.
+  async function createAccount() {
+    const user = newUser.trim();
+    if (!user || !newPass) {
+      window.alert("username and password are required");
+      return;
+    }
+    await postTask(
+      d.key,
+      "addobject",
+      {
+        object_name: acctBase,
+        parameter_key: "acs-" + Date.now(),
+        then_set: [
+          ["UserName", user],
+          ["Password", newPass],
+          ["Group", newGroup],
+          ["Permission", newPerm.trim() || "web,cli"],
+          ["FullName", user],
+        ],
+      },
+      `create account ${user} (${newGroup})`,
+    );
+    const r = await postConnReq(d.key);
+    setNewUser("");
+    setNewPass("");
+    setTimeout(onChanged, 600);
+    window.alert(
+      (r.ok ? "Queued + pushed. " : "Queued (push failed: " + r.detail + "). ") +
+        "Reboot the router to apply, then log in as the new user.",
+    );
   }
 
   const acctLabel = (a: Account) =>
@@ -285,11 +326,43 @@ export default function Accounts({ device: d, onChanged }: Props) {
           </div>
         )}
 
+        <div className="acct-new">
+          <span className="mut">New account:</span>
+          <input
+            className="sm-input"
+            placeholder="username"
+            value={newUser}
+            onInput={(e) => setNewUser((e.target as HTMLInputElement).value)}
+          />
+          <input
+            className="sm-input"
+            placeholder="password"
+            value={newPass}
+            onInput={(e) => setNewPass((e.target as HTMLInputElement).value)}
+          />
+          <select value={newGroup} onChange={(e) => setNewGroup(e.target.value)}>
+            {GROUPS.map((g) => (
+              <option key={g} value={g}>
+                {g}
+              </option>
+            ))}
+          </select>
+          <input
+            className="sm-input"
+            placeholder="permission"
+            value={newPerm}
+            onInput={(e) => setNewPerm((e.target as HTMLInputElement).value)}
+          />
+          <button type="button" className="sm acc" onClick={() => void createAccount()}>
+            + Create
+          </button>
+        </div>
+
         <div className="set-hint mut">
           Changes are queued and apply when the CPE next processes the queue (use
-          <b> 📡 Apply now</b> to push immediately). Group / permission changes
-          need a <b>reboot</b> to regenerate the CLI privilege file before{" "}
-          <code>sh</code> becomes visible.{" "}
+          <b> 📡 Apply now</b> to push immediately). Group / permission changes —
+          and a new account — need a <b>reboot</b> to regenerate the CLI privilege
+          file before <code>sh</code> works.{" "}
           <button type="button" className="sm" onClick={reboot}>
             Reboot to apply
           </button>

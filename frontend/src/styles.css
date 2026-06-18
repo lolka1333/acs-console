@@ -387,6 +387,25 @@ button.sm {
   background: rgba(63, 185, 80, 0.12);
 }
 
+/* New-account quick-create row (Users & Groups panel). */
+.acct-new {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.acct-new .sm-input {
+  min-width: 0;
+  width: 130px;
+  padding: 4px 7px;
+}
+.acct-new select {
+  padding: 4px 7px;
+}
+
 /* ---- Expandable task-result cell (Task history) ---- */
 details.taskres > summary {
   color: inherit; /* keep the table value colour, not link-blue */

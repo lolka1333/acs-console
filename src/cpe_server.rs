@@ -843,12 +843,44 @@ fn handle_rpc_response(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // "create account" chaining: an AddObject may carry a `then_set` list of
+        // [leaf, value] pairs; once the CPE returns the new instance number we
+        // queue a SetParameterValues that fills that instance's fields. The set
+        // is drained in THIS same session by send_next below.
+        let then_set = t.args.get("then_set").cloned();
+        let object_name = t
+            .args
+            .get("object_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         store.finish_task(key, t, "done", result, Value::Null);
         // discovery walk expansion
         if let Some(wid) = walk_id
             && kind == "GetParameterNamesResponse"
         {
             expand_walk(store, key, wid, walk_depth, &path, msg);
+        }
+        if kind == "AddObjectResponse"
+            && let Some(inst) = msg.instance_number.as_deref()
+            && !inst.is_empty()
+            && let Some(pairs) = then_set.as_ref().and_then(|v| v.as_array())
+            && !pairs.is_empty()
+        {
+            let params: Vec<Value> = pairs
+                .iter()
+                .filter_map(|p| {
+                    let a = p.as_array()?;
+                    let leaf = a.first()?.as_str()?;
+                    let val = a.get(1)?.as_str()?;
+                    Some(json!([format!("{object_name}{inst}.{leaf}"), val, ""]))
+                })
+                .collect();
+            if !params.is_empty() {
+                let args = json!({ "params": params, "parameter_key": format!("acs-acct-{inst}") });
+                let label = format!("set new account fields (inst {inst})");
+                store.enqueue(key, Task::new("set", args, Some(&label), None, 0));
+            }
         }
     }
     send_next(store, session_key, session_ns, seq, inflight)
