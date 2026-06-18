@@ -25,6 +25,14 @@ const isOn = (v?: string) => v === "1" || /^true$/i.test(v ?? "");
 const permSet = (v?: string) =>
   new Set((v ?? "").split(",").map((s) => s.trim()).filter(Boolean));
 
+// A reasonably strong, unambiguous password (no l/I/O/0).
+function genPassword(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+  const a = new Uint32Array(14);
+  crypto.getRandomValues(a);
+  return Array.from(a, (x) => chars[x % chars.length]).join("");
+}
+
 export default function Accounts({ device: d, onChanged }: Props) {
   const root = d.root || "InternetGatewayDevice.";
   const mgmt = root + "X_SC_Management.";
@@ -61,9 +69,8 @@ export default function Accounts({ device: d, onChanged }: Props) {
     return { accounts, shell, serverVals, hasData: accounts.length > 0 || shell != null };
   }, [d.parameters, acctBase, shellName]);
 
-  // Optimistic overrides keyed by full parameter name: a click shows instantly
-  // (a queued Set only reaches the CPE on its next contact), and each override
-  // is dropped once a later read-back confirms the same value on the server.
+  // Optimistic overrides keyed by full parameter name (instant feedback; cleared
+  // once a read-back confirms the same value), plus assorted UI state.
   const [pending, setPending] = useState<Record<string, string>>({});
   useEffect(() => setPending({}), [d.key]); // forget overrides when switching device
   useEffect(() => {
@@ -78,15 +85,17 @@ export default function Accounts({ device: d, onChanged }: Props) {
       return next;
     });
   }, [serverVals]);
-
   const effective = (name: string, server?: string) =>
     name in pending ? pending[name] : server;
 
-  // New-account form fields.
+  const [dirty, setDirty] = useState(false); // a change is queued but not yet rebooted-in
+  const [openMenu, setOpenMenu] = useState<string | null>(null); // open per-row action menu
+  const [showCreate, setShowCreate] = useState(false);
+  const [showPass, setShowPass] = useState(false);
   const [newUser, setNewUser] = useState("");
   const [newPass, setNewPass] = useState("");
   const [newGroup, setNewGroup] = useState("admin");
-  const [newPerm, setNewPerm] = useState("web,cli");
+  const [newPerm, setNewPerm] = useState<Set<string>>(() => new Set(["web", "cli"]));
 
   async function task(type: string, args: Record<string, unknown>, label: string) {
     await postTask(d.key, type, args, label);
@@ -107,6 +116,7 @@ export default function Accounts({ device: d, onChanged }: Props) {
       for (const [name, value] of params) next[name] = value;
       return next;
     });
+    setDirty(true);
     void task("set", { params, parameter_key: "acs-" + Date.now() }, label);
   }
   const setField = (name: string, value: string, label: string) =>
@@ -131,23 +141,40 @@ export default function Accounts({ device: d, onChanged }: Props) {
     );
   }
 
-  function toggleEnable(a: Account) {
-    const name = `${acctBase}${a.inst}.Enable`;
-    const on = isOn(effective(name, a.fields.Enable?.value));
-    setField(name, on ? "0" : "1", `account ${a.inst}: ${on ? "disable" : "enable"}`);
-  }
-
   function setShell(on: boolean) {
     setField(shellName, on ? "1" : "0", `ShellEnable=${on ? 1 : 0}`);
   }
 
-  // The common workflow: promote to admin AND open the shell gate, in one
-  // atomic SetParameterValues (TR-069 SPV carries multiple params natively).
+  // Promote to admin AND open the shell gate, in one atomic SetParameterValues.
   function makeAdmin(a: Account) {
     setFields(
       [[`${acctBase}${a.inst}.Group`, "admin", ""], [shellName, "1", ""]],
       `account ${a.inst}: -> admin + ShellEnable=1`,
     );
+  }
+
+  function changePassword(a: Account) {
+    const p = window.prompt(`New password for "${acctLabel(a)}":`);
+    if (!p) return;
+    setField(`${acctBase}${a.inst}.Password`, p, `account ${a.inst}: change password`);
+  }
+
+  function rename(a: Account) {
+    const v = window.prompt(`Full name for "${acctLabel(a)}":`, a.fields.FullName?.value || "");
+    if (v == null) return;
+    setField(`${acctBase}${a.inst}.FullName`, v, `account ${a.inst}: rename`);
+  }
+
+  function delAccount(a: Account) {
+    if (!window.confirm(`Delete account "${acctLabel(a)}" (instance ${a.inst})? This cannot be undone.`))
+      return;
+    setDirty(true);
+    void task(
+      "deleteobject",
+      { object_name: `${acctBase}${a.inst}.`, parameter_key: "acs-" + Date.now() },
+      `delete account ${a.inst}`,
+    );
+    setTimeout(() => void task("get", subtree(), "refresh accounts"), 1500);
   }
 
   // Push queued changes now: queue a read-back first so the CPE drains the
@@ -160,19 +187,30 @@ export default function Accounts({ device: d, onChanged }: Props) {
   }
 
   function reboot() {
-    if (window.confirm("Reboot the router now to apply group / permission changes?"))
+    if (window.confirm("Reboot the router now to apply the queued changes?")) {
       void task("reboot", { command_key: "acs-reboot" }, "REBOOT");
+      setDirty(false);
+    }
   }
 
-  // Quick create: one AddObject carrying a `then_set` list. The ACS reads the new
-  // instance number from the AddObjectResponse and fills the fields in the same
-  // session (see handle_rpc_response). Then push it and remind to reboot.
+  function toggleNewPerm(tok: string) {
+    setNewPerm((s) => {
+      const n = new Set(s);
+      if (n.has(tok)) n.delete(tok);
+      else n.add(tok);
+      return n;
+    });
+  }
+
+  // Quick create: one AddObject carrying a `then_set` list; the ACS fills the new
+  // instance's fields once the CPE returns its number (see handle_rpc_response).
   async function createAccount() {
     const user = newUser.trim();
     if (!user || !newPass) {
       window.alert("username and password are required");
       return;
     }
+    const perm = PERMS.filter((t) => newPerm.has(t)).join(",") || "web,cli";
     await postTask(
       d.key,
       "addobject",
@@ -183,7 +221,7 @@ export default function Accounts({ device: d, onChanged }: Props) {
           ["UserName", user],
           ["Password", newPass],
           ["Group", newGroup],
-          ["Permission", newPerm.trim() || "web,cli"],
+          ["Permission", perm],
           ["FullName", user],
         ],
       },
@@ -192,10 +230,12 @@ export default function Accounts({ device: d, onChanged }: Props) {
     const r = await postConnReq(d.key);
     setNewUser("");
     setNewPass("");
+    setShowCreate(false);
+    setDirty(true);
     setTimeout(onChanged, 600);
     window.alert(
       (r.ok ? "Queued + pushed. " : "Queued (push failed: " + r.detail + "). ") +
-        "Reboot the router to apply, then log in as the new user.",
+        "Reboot to apply, then log in as the new user.",
     );
   }
 
@@ -221,20 +261,112 @@ export default function Accounts({ device: d, onChanged }: Props) {
           >
             📡 Apply now
           </button>
+          <button type="button" className="sm acc" onClick={() => setShowCreate((v) => !v)}>
+            ＋ New
+          </button>
         </span>
       </h2>
       <div className="body">
+        {dirty && (
+          <div className="acct-reboot">
+            <span>
+              ⚠ Changes are queued. A <b>reboot</b> regenerates the CLI privilege
+              file so group / account changes take effect.
+            </span>
+            <button type="button" className="sm" onClick={reboot}>
+              Reboot to apply
+            </button>
+          </div>
+        )}
+
+        {showCreate && (
+          <div className="acct-form">
+            <div className="acct-form-grid">
+              <label>Username</label>
+              <input
+                value={newUser}
+                placeholder="myadmin"
+                onInput={(e) => setNewUser((e.target as HTMLInputElement).value)}
+              />
+              <label>Password</label>
+              <span className="acct-pwrow">
+                <input
+                  type={showPass ? "text" : "password"}
+                  value={newPass}
+                  placeholder="password"
+                  onInput={(e) => setNewPass((e.target as HTMLInputElement).value)}
+                />
+                <button type="button" className="sm" onClick={() => setNewPass(genPassword())}>
+                  🎲 generate
+                </button>
+                <button
+                  type="button"
+                  className="sm"
+                  aria-label={showPass ? "hide password" : "show password"}
+                  onClick={() => setShowPass((v) => !v)}
+                >
+                  {showPass ? "🙈" : "👁"}
+                </button>
+              </span>
+              <label>Group</label>
+              <span className="seg">
+                {GROUPS.map((g) => (
+                  <button
+                    key={g}
+                    type="button"
+                    className={newGroup === g ? "on" : ""}
+                    aria-pressed={newGroup === g}
+                    onClick={() => setNewGroup(g)}
+                  >
+                    {g}
+                  </button>
+                ))}
+              </span>
+              <label>Access</label>
+              <span className="grp">
+                {PERMS.map((tok) => (
+                  <button
+                    key={tok}
+                    type="button"
+                    className={"chip" + (newPerm.has(tok) ? " on" : "")}
+                    aria-pressed={newPerm.has(tok)}
+                    onClick={() => toggleNewPerm(tok)}
+                  >
+                    {tok}
+                  </button>
+                ))}
+              </span>
+            </div>
+            <div className="acct-form-foot">
+              <button type="button" className="sm" onClick={() => setShowCreate(false)}>
+                Cancel
+              </button>
+              <button type="button" className="sm acc" onClick={() => void createAccount()}>
+                ＋ Create account
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="row">
           <span className="mut">Shell access (X_SC_Management.ShellEnable):</span>
-          <span className={"chip" + (shellKnown && shellOn ? " on" : "")}>
-            {shellKnown ? (shellOn ? "ON" : "OFF") : "unknown"}
+          <span className="acct-sw">
+            <button
+              type="button"
+              className={shellKnown && shellOn ? "on" : ""}
+              onClick={() => setShell(true)}
+            >
+              ON
+            </button>
+            <button
+              type="button"
+              className={shellKnown && !shellOn ? "off" : ""}
+              onClick={() => setShell(false)}
+            >
+              OFF
+            </button>
           </span>
-          <button type="button" className="sm" onClick={() => setShell(true)}>
-            Enable shell
-          </button>
-          <button type="button" className="sm" onClick={() => setShell(false)}>
-            Disable
-          </button>
+          {!shellKnown && <span className="mut">unknown</span>}
         </div>
 
         {!hasData ? (
@@ -251,7 +383,6 @@ export default function Accounts({ device: d, onChanged }: Props) {
                   <th>User</th>
                   <th>Group</th>
                   <th>Permission</th>
-                  <th>Enabled</th>
                   <th></th>
                 </tr>
               </thead>
@@ -261,27 +392,24 @@ export default function Accounts({ device: d, onChanged }: Props) {
                   const perms = permSet(
                     effective(`${acctBase}${a.inst}.Permission`, a.fields.Permission?.value),
                   );
-                  const enabled = isOn(
-                    effective(`${acctBase}${a.inst}.Enable`, a.fields.Enable?.value),
-                  );
                   return (
                     <tr key={a.inst}>
                       <td className="mut">{a.inst}</td>
                       <td className="val">{acctLabel(a)}</td>
                       <td>
-                        <div className="grp">
+                        <span className="seg">
                           {GROUPS.map((g) => (
                             <button
                               key={g}
                               type="button"
-                              className={"sm" + (group === g ? " acc" : "")}
+                              className={group === g ? "on" : ""}
                               aria-pressed={group === g}
                               onClick={() => setGroup(a, g)}
                             >
                               {g}
                             </button>
                           ))}
-                        </div>
+                        </span>
                       </td>
                       <td>
                         <div className="grp">
@@ -298,25 +426,35 @@ export default function Accounts({ device: d, onChanged }: Props) {
                           ))}
                         </div>
                       </td>
-                      <td>
+                      <td className="acct-actions">
                         <button
                           type="button"
                           className="sm"
-                          aria-pressed={enabled}
-                          onClick={() => toggleEnable(a)}
+                          aria-label="account actions"
+                          onClick={() => setOpenMenu(openMenu === a.inst ? null : a.inst)}
                         >
-                          {enabled ? "✓ on" : "✗ off"}
+                          ⋮
                         </button>
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          className="sm acc"
-                          title="Set Group=admin and ShellEnable=1 (then reboot)"
-                          onClick={() => makeAdmin(a)}
-                        >
-                          ⬆ admin+shell
-                        </button>
+                        {openMenu === a.inst && (
+                          <div className="acct-menu">
+                            <button type="button" onClick={() => { makeAdmin(a); setOpenMenu(null); }}>
+                              ⬆ admin + shell
+                            </button>
+                            <button type="button" onClick={() => { changePassword(a); setOpenMenu(null); }}>
+                              change password
+                            </button>
+                            <button type="button" onClick={() => { rename(a); setOpenMenu(null); }}>
+                              rename (FullName)
+                            </button>
+                            <button
+                              type="button"
+                              className="del"
+                              onClick={() => { delAccount(a); setOpenMenu(null); }}
+                            >
+                              delete account
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -325,47 +463,14 @@ export default function Accounts({ device: d, onChanged }: Props) {
             </table>
           </div>
         )}
-
-        <div className="acct-new">
-          <span className="mut">New account:</span>
-          <input
-            className="sm-input"
-            placeholder="username"
-            value={newUser}
-            onInput={(e) => setNewUser((e.target as HTMLInputElement).value)}
-          />
-          <input
-            className="sm-input"
-            placeholder="password"
-            value={newPass}
-            onInput={(e) => setNewPass((e.target as HTMLInputElement).value)}
-          />
-          <select value={newGroup} onChange={(e) => setNewGroup(e.target.value)}>
-            {GROUPS.map((g) => (
-              <option key={g} value={g}>
-                {g}
-              </option>
-            ))}
-          </select>
-          <input
-            className="sm-input"
-            placeholder="permission"
-            value={newPerm}
-            onInput={(e) => setNewPerm((e.target as HTMLInputElement).value)}
-          />
-          <button type="button" className="sm acc" onClick={() => void createAccount()}>
-            + Create
-          </button>
-        </div>
+        {openMenu !== null && (
+          <div className="acct-backdrop" onClick={() => setOpenMenu(null)} aria-hidden="true" />
+        )}
 
         <div className="set-hint mut">
           Changes are queued and apply when the CPE next processes the queue (use
-          <b> 📡 Apply now</b> to push immediately). Group / permission changes —
-          and a new account — need a <b>reboot</b> to regenerate the CLI privilege
-          file before <code>sh</code> works.{" "}
-          <button type="button" className="sm" onClick={reboot}>
-            Reboot to apply
-          </button>
+          <b> 📡 Apply now</b> to push immediately). Group / permission changes and
+          new accounts need a <b>reboot</b> before <code>sh</code> works.
         </div>
       </div>
     </div>

@@ -387,23 +387,164 @@ button.sm {
   background: rgba(63, 185, 80, 0.12);
 }
 
-/* New-account quick-create row (Users & Groups panel). */
-.acct-new {
+/* ---- Users & Groups panel ---- */
+/* Segmented group selector. */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.seg button {
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--line);
+  color: var(--mut);
+  padding: 3px 11px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.seg button:last-child {
+  border-right: 0;
+}
+.seg button:hover {
+  color: #fff;
+}
+.seg button.on,
+.seg button.on:hover {
+  background: var(--acc);
+  color: #06121f;
+  font-weight: 600;
+}
+
+/* Shell ON/OFF switch. */
+.acct-sw {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  overflow: hidden;
+}
+.acct-sw button {
+  background: transparent;
+  border: 0;
+  color: var(--mut);
+  padding: 2px 13px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.acct-sw button.on {
+  background: var(--ok);
+  color: #06140a;
+  font-weight: 600;
+}
+.acct-sw button.off {
+  background: #39424f;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* "Reboot needed" banner. */
+.acct-reboot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(210, 153, 34, 0.1);
+  border: 1px solid rgba(210, 153, 34, 0.4);
+  color: #e9c06a;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.acct-reboot span {
+  flex: 1;
+}
+
+/* Per-row actions menu (kebab). */
+.acct-actions {
+  position: relative;
+  text-align: right;
+  white-space: nowrap;
+}
+.acct-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 2px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px;
+}
+.acct-menu button {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  text-align: left;
+  padding: 6px 9px;
+  border-radius: 5px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.acct-menu button:hover {
+  background: var(--line);
+}
+.acct-menu button.del {
+  color: var(--err);
+}
+.acct-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+}
+
+/* Expandable create-account form. */
+.acct-form {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel2);
+  padding: 14px;
+  margin-bottom: 12px;
+}
+.acct-form-grid {
+  display: grid;
+  grid-template-columns: 74px 1fr;
+  gap: 10px 12px;
+  align-items: center;
+}
+.acct-form-grid label {
+  color: var(--mut);
+  font-size: 12px;
+}
+.acct-form-grid > input {
+  width: 200px;
+  max-width: 100%;
+}
+.acct-pwrow {
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
   align-items: center;
-  margin-top: 10px;
-  padding-top: 10px;
+  flex-wrap: wrap;
+}
+.acct-pwrow input {
+  flex: 1;
+  min-width: 150px;
+}
+.acct-form-foot {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
   border-top: 1px solid var(--line);
-}
-.acct-new .sm-input {
-  min-width: 0;
-  width: 130px;
-  padding: 4px 7px;
-}
-.acct-new select {
-  padding: 4px 7px;
+  padding-top: 12px;
 }
 
 /* ---- Expandable task-result cell (Task history) ---- */
