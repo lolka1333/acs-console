@@ -388,6 +388,10 @@ button.sm {
 }
 
 /* ---- Users & Groups panel ---- */
+/* Small table, no scroll wrapper, so the per-row action menu can overflow it. */
+.acct-table th {
+  position: static;
+}
 /* Segmented group selector. */
 .seg {
   display: inline-flex;

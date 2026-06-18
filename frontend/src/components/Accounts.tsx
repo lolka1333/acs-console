@@ -375,9 +375,8 @@ export default function Accounts({ device: d, onChanged }: Props) {
             LoginAccount table from the device.
           </div>
         ) : (
-          <div className="scroll">
-            <table className="dense">
-              <thead>
+          <table className="dense acct-table">
+            <thead>
                 <tr>
                   <th>#</th>
                   <th>User</th>
@@ -461,7 +460,6 @@ export default function Accounts({ device: d, onChanged }: Props) {
                 })}
               </tbody>
             </table>
-          </div>
         )}
         {openMenu !== null && (
           <div className="acct-backdrop" onClick={() => setOpenMenu(null)} aria-hidden="true" />
