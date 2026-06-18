@@ -510,48 +510,37 @@ button.sm {
   z-index: 15;
 }
 
-/* Expandable create-account form: vertical fields, fixed width, consistent inputs. */
-.acct-form {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel2);
-  padding: 14px 16px;
-  margin-bottom: 12px;
-  max-width: 440px;
+/* Create-account modal (reuses .modal* from the Settings / Wire dialogs). */
+.modal.acct-modal {
+  max-width: 420px;
 }
-.acct-field {
-  margin-bottom: 13px;
+.acct-mgrid {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 12px;
+  align-items: center;
+  justify-items: start;
 }
-.acct-field > label {
-  display: block;
+.acct-mgrid > label {
   color: var(--mut);
-  font-size: 11px;
-  margin-bottom: 6px;
-  letter-spacing: 0.03em;
+  font-size: 12px;
 }
-.acct-field > input {
+.acct-mgrid > input {
   width: 100%;
 }
-.acct-field .seg button {
-  padding: 5px 14px;
+.acct-mgrid .seg button {
+  padding: 5px 13px;
   font-size: 12px;
 }
 .acct-pwrow {
   display: flex;
   gap: 6px;
   align-items: center;
+  width: 100%;
 }
 .acct-pwrow input {
   flex: 1;
   min-width: 0;
-}
-.acct-form-foot {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  margin-top: 2px;
-  border-top: 1px solid var(--line);
-  padding-top: 12px;
 }
 
 /* ---- Expandable task-result cell (Task history) ---- */

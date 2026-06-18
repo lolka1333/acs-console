@@ -279,81 +279,6 @@ export default function Accounts({ device: d, onChanged }: Props) {
           </div>
         )}
 
-        {showCreate && (
-          <div className="acct-form">
-            <div className="acct-field">
-              <label>Username</label>
-              <input
-                value={newUser}
-                placeholder="myadmin"
-                onInput={(e) => setNewUser((e.target as HTMLInputElement).value)}
-              />
-            </div>
-            <div className="acct-field">
-              <label>Password</label>
-              <span className="acct-pwrow">
-                <input
-                  type={showPass ? "text" : "password"}
-                  value={newPass}
-                  placeholder="password"
-                  onInput={(e) => setNewPass((e.target as HTMLInputElement).value)}
-                />
-                <button type="button" className="sm" onClick={() => setNewPass(genPassword())}>
-                  🎲 generate
-                </button>
-                <button
-                  type="button"
-                  className="sm"
-                  aria-label={showPass ? "hide password" : "show password"}
-                  onClick={() => setShowPass((v) => !v)}
-                >
-                  {showPass ? "🙈" : "👁"}
-                </button>
-              </span>
-            </div>
-            <div className="acct-field">
-              <label>Group</label>
-              <span className="seg">
-                {GROUPS.map((g) => (
-                  <button
-                    key={g}
-                    type="button"
-                    className={newGroup === g ? "on" : ""}
-                    aria-pressed={newGroup === g}
-                    onClick={() => setNewGroup(g)}
-                  >
-                    {g}
-                  </button>
-                ))}
-              </span>
-            </div>
-            <div className="acct-field">
-              <label>Access</label>
-              <span className="grp">
-                {PERMS.map((tok) => (
-                  <button
-                    key={tok}
-                    type="button"
-                    className={"chip" + (newPerm.has(tok) ? " on" : "")}
-                    aria-pressed={newPerm.has(tok)}
-                    onClick={() => toggleNewPerm(tok)}
-                  >
-                    {tok}
-                  </button>
-                ))}
-              </span>
-            </div>
-            <div className="acct-form-foot">
-              <button type="button" className="sm" onClick={() => setShowCreate(false)}>
-                Cancel
-              </button>
-              <button type="button" className="sm acc" onClick={() => void createAccount()}>
-                ＋ Create account
-              </button>
-            </div>
-          </div>
-        )}
-
         <div className="row">
           <span className="mut">Shell access (X_SC_Management.ShellEnable):</span>
           <span className="acct-sw">
@@ -477,6 +402,95 @@ export default function Accounts({ device: d, onChanged }: Props) {
           new accounts need a <b>reboot</b> before <code>sh</code> works.
         </div>
       </div>
+
+      {showCreate && (
+        <div className="modal-backdrop" onClick={() => setShowCreate(false)}>
+          <div
+            className="modal acct-modal"
+            role="dialog"
+            aria-label="Create account"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-head">
+              <h2>＋ Create account</h2>
+              <button
+                type="button"
+                className="sm"
+                aria-label="close"
+                onClick={() => setShowCreate(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="acct-mgrid">
+                <label>Username</label>
+                <input
+                  value={newUser}
+                  placeholder="myadmin"
+                  onInput={(e) => setNewUser((e.target as HTMLInputElement).value)}
+                />
+                <label>Password</label>
+                <span className="acct-pwrow">
+                  <input
+                    type={showPass ? "text" : "password"}
+                    value={newPass}
+                    placeholder="password"
+                    onInput={(e) => setNewPass((e.target as HTMLInputElement).value)}
+                  />
+                  <button type="button" className="sm" onClick={() => setNewPass(genPassword())}>
+                    🎲 generate
+                  </button>
+                  <button
+                    type="button"
+                    className="sm"
+                    aria-label={showPass ? "hide password" : "show password"}
+                    onClick={() => setShowPass((v) => !v)}
+                  >
+                    {showPass ? "🙈" : "👁"}
+                  </button>
+                </span>
+                <label>Group</label>
+                <span className="seg">
+                  {GROUPS.map((g) => (
+                    <button
+                      key={g}
+                      type="button"
+                      className={newGroup === g ? "on" : ""}
+                      aria-pressed={newGroup === g}
+                      onClick={() => setNewGroup(g)}
+                    >
+                      {g}
+                    </button>
+                  ))}
+                </span>
+                <label>Access</label>
+                <span className="grp">
+                  {PERMS.map((tok) => (
+                    <button
+                      key={tok}
+                      type="button"
+                      className={"chip" + (newPerm.has(tok) ? " on" : "")}
+                      aria-pressed={newPerm.has(tok)}
+                      onClick={() => toggleNewPerm(tok)}
+                    >
+                      {tok}
+                    </button>
+                  ))}
+                </span>
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="sm" onClick={() => setShowCreate(false)}>
+                Cancel
+              </button>
+              <button type="button" className="sm acc" onClick={() => void createAccount()}>
+                ＋ Create account
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
