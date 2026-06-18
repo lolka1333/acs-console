@@ -1067,6 +1067,49 @@ impl Store {
         });
     }
 
+    /// A GetParameterValues over a trailing-dot subtree is authoritative for
+    /// that subtree: any cached name under `prefix` that the CPE did NOT return
+    /// in `present` was deleted on the device (e.g. via DeleteObject). Drop
+    /// those stale entries from RAM and from SQLite so the view stops showing
+    /// ghost instances. `persist_device` only ever UPSERTs params, so the row
+    /// must be deleted explicitly here.
+    pub fn prune_subtree(
+        &self,
+        key: &str,
+        prefix: &str,
+        present: &std::collections::HashSet<String>,
+    ) {
+        let removed: Vec<String> = {
+            let mut g = self.inner.lock();
+            let dev = match g.devices.get_mut(key) {
+                Some(d) => d,
+                None => return,
+            };
+            let stale: Vec<String> = dev
+                .parameters
+                .keys()
+                .filter(|n| n.starts_with(prefix) && !present.contains(n.as_str()))
+                .cloned()
+                .collect();
+            for n in &stale {
+                dev.parameters.remove(n);
+            }
+            stale
+        };
+        if removed.is_empty() {
+            return;
+        }
+        let conn = self.db.lock();
+        for n in &removed {
+            if let Err(e) = conn.execute(
+                "DELETE FROM parameters WHERE device_key=?1 AND name=?2",
+                rusqlite::params![key, n],
+            ) {
+                println!("[store] db: prune param {n}: {e}");
+            }
+        }
+    }
+
     pub fn update_names(&self, key: &str, names: &[crate::cwmp::ParamName]) {
         self.get_or_create(key, |dev| {
             let ts = now_iso();
@@ -1501,6 +1544,81 @@ mod tests {
                 .any(|e| e.get("msg").and_then(|v| v.as_str()) == Some("round-trip event")),
             "event should reload"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A subtree GetParameterValues is authoritative: `prune_subtree` must drop
+    /// cached entries the device no longer reports — from RAM and from SQLite —
+    /// while leaving kept instances and siblings outside the subtree intact.
+    #[test]
+    fn prune_subtree_drops_ghost_instances() {
+        let dir = std::env::temp_dir().join(format!("acs_prune_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = "00227F-PRUNE01";
+        let base = "InternetGatewayDevice.X_SC_Management.LoginAccount.";
+        let shell = "InternetGatewayDevice.X_SC_Management.ShellEnable";
+        let pv = |n: String| crate::cwmp::ParamValue {
+            name: n,
+            value: "x".to_string(),
+            type_: "xsd:string".to_string(),
+        };
+        let has = |store: &Store, name: &str| -> bool {
+            store
+                .device_detail(key)
+                .and_then(|d| d.get("parameters").and_then(|v| v.as_array()).cloned())
+                .map(|ps| {
+                    ps.iter()
+                        .any(|p| p.get("name").and_then(|v| v.as_str()) == Some(name))
+                })
+                .unwrap_or(false)
+        };
+
+        let store = Store::new(
+            dir.clone(),
+            Settings::default(),
+            "127.0.0.1".to_string(),
+            false,
+        );
+        store.get_or_create(key, |dev| dev.model = "RV6699".to_string());
+        // instance 1 (kept) + instance 4 (a ghost left in cache after DeleteObject).
+        store.update_parameters(
+            key,
+            &[
+                pv(format!("{base}1.UserName")),
+                pv(format!("{base}4.UserName")),
+                pv(shell.to_string()),
+            ],
+        );
+
+        // The device now re-reports only instance 1 + ShellEnable.
+        let present: std::collections::HashSet<String> =
+            [format!("{base}1.UserName"), shell.to_string()]
+                .into_iter()
+                .collect();
+        store.prune_subtree(key, base, &present);
+
+        assert!(has(&store, &format!("{base}1.UserName")), "kept survives");
+        assert!(
+            !has(&store, &format!("{base}4.UserName")),
+            "ghost pruned (RAM)"
+        );
+        assert!(has(&store, shell), "sibling outside subtree untouched");
+
+        // The ghost must also be gone from SQLite (persist_device only UPSERTs).
+        drop(store);
+        let store2 = Store::new(
+            dir.clone(),
+            Settings::default(),
+            "127.0.0.1".to_string(),
+            false,
+        );
+        assert!(
+            !has(&store2, &format!("{base}4.UserName")),
+            "ghost pruned (DB)"
+        );
+        assert!(has(&store2, &format!("{base}1.UserName")), "kept reloads");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -854,7 +854,25 @@ fn handle_rpc_response(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // A subtree GetParameterValues (a queried name ending in '.') is
+        // authoritative; keep its query names so we can prune deleted entries.
+        let get_names = if kind == "GetParameterValuesResponse" {
+            t.args.get("names").cloned()
+        } else {
+            None
+        };
         store.finish_task(key, t, "done", result, Value::Null);
+        if let Some(names) = get_names.as_ref().and_then(|v| v.as_array()) {
+            let present: std::collections::HashSet<String> =
+                msg.parameters.iter().map(|p| p.name.clone()).collect();
+            for n in names {
+                if let Some(prefix) = n.as_str()
+                    && prefix.ends_with('.')
+                {
+                    store.prune_subtree(key, prefix, &present);
+                }
+            }
+        }
         // discovery walk expansion
         if let Some(wid) = walk_id
             && kind == "GetParameterNamesResponse"
