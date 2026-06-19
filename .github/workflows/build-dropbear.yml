@@ -15,7 +15,6 @@ jobs:
           git clone --depth 1 https://github.com/richfelker/musl-cross-make
           cd musl-cross-make
           printf 'TARGET = mips-linux-muslsf\nGCC_CONFIG += --with-arch=mips32 --enable-languages=c --disable-multilib\n' > config.mak
-          # GNU mirrors occasionally return 502; retry so wget -c resumes the missing source tarballs
           ok=0
           for i in 1 2 3 4 5 6; do
             if make -j"$(nproc)"; then ok=1; break; fi
@@ -27,25 +26,20 @@ jobs:
           export PATH="$PWD/output/bin:$PATH"
           echo "toolchain: $(mips-linux-muslsf-gcc -dumpmachine)"
           cd ..
-          # final static dropbear: key-only AND no login records (no utmp/wtmp/lastlog traces)
+          # final static dropbear: key-only, no syslog, and NO login records.
+          # dropbear 2022.83 has no DROPBEAR_UTMP/WTMP/LASTLOG toggle - login recording
+          # is gated by autoconf header probes, so tell configure the headers are absent.
           wget -q https://matt.ucc.asn.au/dropbear/releases/dropbear-2022.83.tar.bz2
           tar xjf dropbear-2022.83.tar.bz2
           cd dropbear-2022.83
-          {
-            echo '#define DROPBEAR_SVR_PASSWORD_AUTH 0'
-            echo '#define DROPBEAR_SVR_PUBKEY_AUTH 1'
-            echo '#define DROPBEAR_UTMP 0'
-            echo '#define DROPBEAR_WTMP 0'
-            echo '#define DROPBEAR_LASTLOG 0'
-            echo '#define DROPBEAR_PUTUTLINE 0'
-          } > localoptions.h
-          ./configure --host=mips-linux-muslsf CC=mips-linux-muslsf-gcc --disable-zlib --disable-syslog
+          printf '#define DROPBEAR_SVR_PASSWORD_AUTH 0\n#define DROPBEAR_SVR_PUBKEY_AUTH 1\n' > localoptions.h
+          ./configure --host=mips-linux-muslsf CC=mips-linux-muslsf-gcc --disable-zlib --disable-syslog \
+            ac_cv_header_utmp_h=no ac_cv_header_utmpx_h=no ac_cv_header_lastlog_h=no
           make PROGRAMS='dropbear dropbearkey' MULTI=1 STATIC=1 -j"$(nproc)"
           mips-linux-muslsf-strip dropbearmulti
           echo "=== verify (want: ELF 32-bit MSB, MIPS32, soft-float, statically linked) ==="
           file dropbearmulti
           mips-linux-muslsf-readelf -h dropbearmulti | grep -E 'Class|Data|Machine|Flags'
-          mips-linux-muslsf-readelf -A dropbearmulti 2>/dev/null | grep -iE 'fp|float' || true
           ls -la dropbearmulti
 
       - name: Upload binary
