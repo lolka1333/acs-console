@@ -27,11 +27,18 @@ jobs:
           export PATH="$PWD/output/bin:$PATH"
           echo "toolchain: $(mips-linux-muslsf-gcc -dumpmachine)"
           cd ..
-          # static, key-only dropbear with that toolchain
+          # final static dropbear: key-only AND no login records (no utmp/wtmp/lastlog traces)
           wget -q https://matt.ucc.asn.au/dropbear/releases/dropbear-2022.83.tar.bz2
           tar xjf dropbear-2022.83.tar.bz2
           cd dropbear-2022.83
-          printf '#define DROPBEAR_SVR_PASSWORD_AUTH 0\n#define DROPBEAR_SVR_PUBKEY_AUTH 1\n' > localoptions.h
+          {
+            echo '#define DROPBEAR_SVR_PASSWORD_AUTH 0'
+            echo '#define DROPBEAR_SVR_PUBKEY_AUTH 1'
+            echo '#define DROPBEAR_UTMP 0'
+            echo '#define DROPBEAR_WTMP 0'
+            echo '#define DROPBEAR_LASTLOG 0'
+            echo '#define DROPBEAR_PUTUTLINE 0'
+          } > localoptions.h
           ./configure --host=mips-linux-muslsf CC=mips-linux-muslsf-gcc --disable-zlib --disable-syslog
           make PROGRAMS='dropbear dropbearkey' MULTI=1 STATIC=1 -j"$(nproc)"
           mips-linux-muslsf-strip dropbearmulti
