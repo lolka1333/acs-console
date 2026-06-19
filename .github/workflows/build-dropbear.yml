@@ -5,22 +5,34 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install MIPS big-endian cross toolchain
-        run: sudo apt-get update && sudo apt-get install -y gcc-mips-linux-gnu wget bzip2 make file
+      - name: Install host build deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential wget bzip2 file git make rsync texinfo
 
-      - name: Build dropbear (static, MIPS big-endian, key-only)
+      - name: Build mips32(r1) soft-float musl toolchain + static dropbear
         run: |
+          set -e
+          # 1) matched cross toolchain: MIPS32 r1, SOFT-float, o32, big-endian, musl
+          #    (stock firmware is MIPS32r1 + soft-float; Debian's prebuilt libc was r2/hard -> SIGILL)
+          git clone --depth 1 https://github.com/richfelker/musl-cross-make
+          cd musl-cross-make
+          printf 'TARGET = mips-linux-muslsf\nGCC_CONFIG += --with-arch=mips32 --enable-languages=c --disable-multilib\n' > config.mak
+          make -j"$(nproc)"
+          make install
+          export PATH="$PWD/output/bin:$PATH"
+          echo "toolchain: $(mips-linux-muslsf-gcc -dumpmachine)"
+          cd ..
+          # 2) static, key-only dropbear with that toolchain
           wget -q https://matt.ucc.asn.au/dropbear/releases/dropbear-2022.83.tar.bz2
           tar xjf dropbear-2022.83.tar.bz2
           cd dropbear-2022.83
-          # Key-only server: disable password auth. The cross libc has no crypt(),
-          # and the covert backdoor is pubkey-only by design anyway.
           printf '#define DROPBEAR_SVR_PASSWORD_AUTH 0\n#define DROPBEAR_SVR_PUBKEY_AUTH 1\n' > localoptions.h
-          ./configure --host=mips-linux-gnu CC=mips-linux-gnu-gcc --disable-zlib --disable-syslog
-          make PROGRAMS='dropbear dropbearkey' MULTI=1 STATIC=1 -j$(nproc)
-          mips-linux-gnu-strip dropbearmulti
-          echo "=== file check (want: ELF 32-bit MSB ... MIPS ... statically linked) ==="
+          ./configure --host=mips-linux-muslsf CC=mips-linux-muslsf-gcc --disable-zlib --disable-syslog
+          make PROGRAMS='dropbear dropbearkey' MULTI=1 STATIC=1 -j"$(nproc)"
+          mips-linux-muslsf-strip dropbearmulti
+          echo "=== verify (want: ELF 32-bit MSB, MIPS32, soft-float, statically linked) ==="
           file dropbearmulti
+          mips-linux-muslsf-readelf -h dropbearmulti | grep -E 'Class|Data|Machine|Flags'
+          mips-linux-muslsf-readelf -A dropbearmulti 2>/dev/null | grep -iE 'fp|float' || true
           ls -la dropbearmulti
 
       - name: Upload binary
